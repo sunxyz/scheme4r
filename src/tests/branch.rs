@@ -1,6 +1,11 @@
 use crate::{types::Type, eval};
 
 #[test]
-fn test_boolean() {
+fn test_branch() {
     assert_eq!( Type::Booleans(true),eval("(if (- 3 2) #t #f)").unwrap());
+}
+
+#[test]
+fn test(){
+    println!("{}", eval("(#(0 (2 2 2 2) 'Anna'))").unwrap());
 }

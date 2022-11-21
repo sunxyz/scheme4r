@@ -18,7 +18,7 @@
 - Records 
 - Ports
 
-###use
+### use
 - Support cmd and api , can embeddable
 ```
 cargo run
@@ -42,7 +42,7 @@ console
 6
 ```
 
-###learn docs
-[r7rs.org](https://small.r7rs.org/)
-[r7rs-overview.pdf](https://small.r7rs.org/attachment/overview.pdf)
-[r7rs.pdf](https://small.r7rs.org/attachment/r7rs.pdf)
+### learn docs
+- [r7rs.org](https://small.r7rs.org/)
+- [r7rs-overview.pdf](https://small.r7rs.org/attachment/overview.pdf)
+- [r7rs.pdf](https://small.r7rs.org/attachment/r7rs.pdf)

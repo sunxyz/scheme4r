@@ -1,4 +1,4 @@
-use super::types::{List, Type};
+use super::types::Type;
 static VEC_PREFIX: &'static str = "#(";
 static PREFIX: &'static str = "(";
 static SUFFIX: &'static str = ")";
@@ -11,36 +11,49 @@ pub fn parser(expr: String) -> Result<Type, String> {
 
 fn parse0(expr: String) -> Type {
     if expr.starts_with(PREFIX) {
-        Type::Lists(parse_expr(expr))
+        parse_expr(expr)
     } else {
         parse_atom(&expr).unwrap()
     }
 }
 
-fn parse_expr(expr: String) -> List {
+fn parse_expr(expr: String) -> Type {
     let mut stack = Vec::new();
     let mut next = true;
     let mut exp = expr.as_str();
     while next {
         exp = exp.trim();
-        let is_push = exp.starts_with(PREFIX);
-        let next_exp = &exp[1..];
-        let (to_index, _) = get_to_index(next_exp);
+        let is_vec = exp.starts_with(VEC_PREFIX);
+        let is_push = exp.starts_with(PREFIX) || is_vec;
+        let index = if exp.starts_with(VEC_PREFIX) { 2 } else { 1 };
+        let next_exp = &exp[index..];
+        let to_index = get_to_index(next_exp);
         next = next_exp.find(SUFFIX) != None;
         let sub_exp = &next_exp[..to_index];
-        // print!("sub_exp:{} next_exp:{}" , sub_exp, next_exp);
+        // println!("sub_exp:{} next_exp:{} is_vec:{}" , sub_exp, next_exp, is_vec);
         if is_push {
-            let mut expr = List::new();
-            expr.push_vec(parse_vec(sub_exp));
-            stack.push(expr);
+            if is_vec {
+                stack.push(Type::vector_of(parse_vec(sub_exp)));
+            } else {
+                stack.push(Type::expr_of(parse_vec(sub_exp)));
+            }
         } else {
             let brother = stack.pop().unwrap();
             if stack.is_empty() {
                 stack.push(brother);
             } else {
                 let mut parent = stack.pop().unwrap();
-                parent.push(Type::Lists(brother));
-                parent.push_vec(parse_vec(sub_exp));
+                match &mut parent {
+                    Type::Lists(p) => {
+                        p.push(brother);
+                        p.push_vec(parse_vec(sub_exp));
+                    }
+                    Type::Vectors(p) => {
+                        p.push(brother);
+                        p.push_vec(parse_vec(sub_exp));
+                    }
+                    _ => {}
+                }
                 stack.push(parent);
             }
         }
@@ -54,30 +67,30 @@ fn parse_expr(expr: String) -> List {
     stack.pop().unwrap()
 }
 
-fn get_to_index(next_exp: &str) -> (usize, &'static str) {
-    let pre = next_exp.find(PREFIX);
+fn get_to_index(next_exp: &str) -> usize {
+    let pre1 = next_exp.find(PREFIX);
     let pre0 = next_exp.find(VEC_PREFIX);
-    let pre = if pre0.is_some() { pre0 } else { pre };
-    let type0 = if pre0.is_some() { VEC_PREFIX } else { PREFIX };
+    let pre = if pre0.is_some() && pre0.unwrap() < pre1.unwrap() {
+        pre0
+    } else {
+        pre1
+    };
     let suf = next_exp.find(SUFFIX);
-    (
-        if suf != None {
-            let suf_index = suf.unwrap();
-            if pre != None {
-                let pre_index = pre.unwrap();
-                if pre_index < suf_index {
-                    pre_index
-                } else {
-                    suf_index
-                }
+    if suf != None {
+        let suf_index = suf.unwrap();
+        if pre != None {
+            let pre_index = pre.unwrap();
+            if pre_index < suf_index {
+                pre_index
             } else {
                 suf_index
             }
         } else {
-            0
-        },
-        type0,
-    )
+            suf_index
+        }
+    } else {
+        0
+    }
 }
 
 fn parse_vec(exp: &str) -> Vec<Type> {

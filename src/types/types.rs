@@ -4,7 +4,7 @@ use super::{
 };
 use std::{fmt::Display, rc::Rc};
 
-pub use super::{list::List, procedure::Procedure, record::Record};
+pub use super::{list::List, procedure::Procedure, record::Record, vector::Vector};
 
 pub type Number = isize;
 pub type Boolean = bool;
@@ -13,7 +13,6 @@ pub type SExpr = List;
 pub type Symbol = String;
 pub type Character = char;
 pub type Strings = Refs<String>;
-pub type Vector = Refs<Vec<Type>>;
 pub type ByteVector = Refs<Vec<u8>>;
 pub type Port = ();
 
@@ -77,7 +76,7 @@ impl Type {
         Type::Strings(new(data))
     }
     pub fn vector_of(vec: Vec<Type>) -> Type {
-        Type::Vectors(new(vec))
+        Type::Vectors(Vector::new(vec))
     }
     pub fn procedure_of(name: &str, f: fn(&mut ApplyArgs) -> Type) -> Type {
         let name = name.to_owned();
@@ -100,15 +99,7 @@ impl Display for Type {
             Type::Symbols(n) => write!(f, "{}", n),
             Type::Characters(n) => write!(f, "{}", n),
             Type::Strings(n) => write!(f, "{}", n.ref_read()),
-            Type::Vectors(n) => write!(
-                f,
-                "#({})",
-                n.ref_read()
-                    .iter()
-                    .map(|x| x.to_string())
-                    .collect::<Vec<String>>()
-                    .join(" ")
-            ),
+            Type::Vectors(n) => write!(f, "{}", n),
             Type::ByteVectors(n) => write!(
                 f,
                 "{}",
