@@ -1,5 +1,6 @@
 use super::types::Type;
 static VEC_PREFIX: &'static str = "#(";
+static U8VEC_PREFIX: &'static str = "#u8(";
 static PREFIX: &'static str = "(";
 static SUFFIX: &'static str = ")";
 
@@ -24,15 +25,25 @@ fn parse_expr(expr: String) -> Type {
     while next {
         exp = exp.trim();
         let is_vec = exp.starts_with(VEC_PREFIX);
-        let is_push = exp.starts_with(PREFIX) || is_vec;
-        let index = if exp.starts_with(VEC_PREFIX) { 2 } else { 1 };
+        let is_u8_vec = exp.starts_with(U8VEC_PREFIX);
+        let is_push = exp.starts_with(PREFIX) || is_vec || is_u8_vec;
+        let index = if is_u8_vec {
+            4
+        } else if is_vec {
+            2
+        } else {
+            1
+        };
         let next_exp = &exp[index..];
         let to_index = get_to_index(next_exp);
         next = next_exp.find(SUFFIX) != None;
         let sub_exp = &next_exp[..to_index];
-        // println!("sub_exp:{} next_exp:{} is_vec:{}" , sub_exp, next_exp, is_vec);
+        // print!("sub_exp:{} next_exp:{} is_push:{} to_index:{}" , sub_exp, next_exp, is_push, to_index);
         if is_push {
-            if is_vec {
+            if is_u8_vec{
+                let v = parse_vec(sub_exp).iter().map(|x|as_u8(x)).collect::<Vec<u8>>();
+                stack.push(Type::u8vector_of(v));
+            }else if is_vec {
                 stack.push(Type::vector_of(parse_vec(sub_exp)));
             } else {
                 stack.push(Type::expr_of(parse_vec(sub_exp)));
@@ -51,6 +62,11 @@ fn parse_expr(expr: String) -> Type {
                     Type::Vectors(p) => {
                         p.push(brother);
                         p.push_vec(parse_vec(sub_exp));
+                    },
+                    Type::ByteVectors(p)=>{
+                        p.push(as_u8(&brother));
+                        let v = parse_vec(sub_exp).iter().map(|x|as_u8(x)).collect::<Vec<u8>>();
+                        p.push_vec(v);
                     }
                     _ => {}
                 }
@@ -61,27 +77,33 @@ fn parse_expr(expr: String) -> Type {
         // println!("stack: {}", stack.len());
         // println!("-----");
         // print!("old-exp:{}to_index:{}",exp, to_index);
-        exp = exp[to_index + 1..].trim();
+        exp = exp[to_index + index..].trim();
         // println!("exp:{}",exp)
     }
     stack.pop().unwrap()
 }
 
+
 fn get_to_index(next_exp: &str) -> usize {
+    // println!("________________________________________________________________{}", next_exp);
     let pre1 = next_exp.find(PREFIX);
     let pre0 = next_exp.find(VEC_PREFIX);
-    let pre = if pre0.is_some() && pre0.unwrap() < pre1.unwrap() {
-        pre0
-    } else {
-        pre1
-    };
+    let pre2 = next_exp.find(U8VEC_PREFIX);
+    // min
+    let mut t = vec![pre0, pre1, pre2]
+        .iter()
+        .filter(|x| x.is_some())
+        .map(|x| x.unwrap())
+        .collect::<Vec<usize>>();
+    t.sort();
+    let pre = t.get(0);
     let suf = next_exp.find(SUFFIX);
     if suf != None {
         let suf_index = suf.unwrap();
         if pre != None {
             let pre_index = pre.unwrap();
-            if pre_index < suf_index {
-                pre_index
+            if *pre_index < suf_index {
+                *pre_index
             } else {
                 suf_index
             }
@@ -138,9 +160,16 @@ fn parse_atom(s: &str) -> Result<Type, String> {
                         .replace("\\n", "\n")
                         .to_string(),
                 )
-            } else if s.starts_with("#") && s.len() == 2 {
+            } else if s.starts_with("#\\") && s.len() == 2 {
                 Type::character_of(s.chars().nth(2).unwrap())
-            } else if s.starts_with("#") && s.len() > 2 {
+            }else if s.starts_with(U8VEC_PREFIX) && s.len() > 4 {
+                let v = parse0(s.replace(U8VEC_PREFIX, "("));
+                let r = match v {
+                    Type::Lists(v) => v.data(),
+                    _ => vec![v],
+                };
+                Type::u8vector_of(r.iter().map(|x|as_u8(x)).collect::<Vec<u8>>())
+            }  else if s.starts_with("#") && s.len() > 2 {
                 let v = parse0(s.replace("#", ""));
                 let r = match v {
                     Type::Lists(v) => v.data(),
@@ -178,4 +207,13 @@ fn peel_onions(s: &str, keys: Vec<&str>) -> Type {
         }
     }
     Type::Symbols(s.to_string())
+}
+
+
+fn as_u8(v:&Type)->u8{
+    match v {
+        Type::Numbers(v)=>{*v as u8},
+        Type::Characters(v)=>{*v as u8},
+        _=>{0},
+    }
 }

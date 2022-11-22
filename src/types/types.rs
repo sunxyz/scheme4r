@@ -4,7 +4,7 @@ use super::{
 };
 use std::{fmt::Display, rc::Rc};
 
-pub use super::{list::List, procedure::Procedure, record::Record, vector::Vector};
+pub use super::{list::List, procedure::Procedure, record::Record, vector::Vector, u8vector::U8Vector};
 
 pub type Number = isize;
 pub type Boolean = bool;
@@ -13,7 +13,7 @@ pub type SExpr = List;
 pub type Symbol = String;
 pub type Character = char;
 pub type Strings = Refs<String>;
-pub type ByteVector = Refs<Vec<u8>>;
+pub type ByteVector = U8Vector;
 pub type Port = ();
 
 #[derive(Debug, PartialEq)]
@@ -78,6 +78,9 @@ impl Type {
     pub fn vector_of(vec: Vec<Type>) -> Type {
         Type::Vectors(Vector::new(vec))
     }
+    pub fn u8vector_of(vec: Vec<u8>) -> Type {
+        Type::ByteVectors(ByteVector::new(vec))
+    }
     pub fn procedure_of(name: &str, f: fn(&mut ApplyArgs) -> Type) -> Type {
         let name = name.to_owned();
         Type::Procedures(Procedure::new(name, Rc::new(f)))
@@ -100,15 +103,7 @@ impl Display for Type {
             Type::Characters(n) => write!(f, "{}", n),
             Type::Strings(n) => write!(f, "{}", n.ref_read()),
             Type::Vectors(n) => write!(f, "{}", n),
-            Type::ByteVectors(n) => write!(
-                f,
-                "{}",
-                n.ref_read()
-                    .iter()
-                    .map(|x| x.to_string())
-                    .collect::<Vec<String>>()
-                    .join(" ")
-            ),
+            Type::ByteVectors(n) => write!(f, "{}", n),
             Type::Procedures(_) => write!(f, "<procedure>"),
             Type::Records(_) => write!(f, "<record>"),
             Type::Ports(_) => write!(f, "<port>",),
