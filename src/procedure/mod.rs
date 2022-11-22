@@ -4,6 +4,7 @@ mod numbers;
 mod set;
 mod quote;
 mod branch;
+mod syntax;
 use crate::{
     env::{Env, EnvOps},
     types::{

@@ -9,3 +9,8 @@ fn test_branch() {
 fn test(){
     println!("{}", eval("(#(0 (2 2 2 2) 'Anna'))").unwrap());
 }
+
+#[test]
+fn test_demo() {
+    println!("{}", eval("(+ 14 (* 23 42))").unwrap());
+}

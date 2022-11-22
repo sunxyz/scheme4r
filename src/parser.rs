@@ -40,10 +40,13 @@ fn parse_expr(expr: String) -> Type {
         let sub_exp = &next_exp[..to_index];
         // print!("sub_exp:{} next_exp:{} is_push:{} to_index:{}" , sub_exp, next_exp, is_push, to_index);
         if is_push {
-            if is_u8_vec{
-                let v = parse_vec(sub_exp).iter().map(|x|as_u8(x)).collect::<Vec<u8>>();
+            if is_u8_vec {
+                let v = parse_vec(sub_exp)
+                    .iter()
+                    .map(|x| as_u8(x))
+                    .collect::<Vec<u8>>();
                 stack.push(Type::u8vector_of(v));
-            }else if is_vec {
+            } else if is_vec {
                 stack.push(Type::vector_of(parse_vec(sub_exp)));
             } else {
                 stack.push(Type::expr_of(parse_vec(sub_exp)));
@@ -62,10 +65,13 @@ fn parse_expr(expr: String) -> Type {
                     Type::Vectors(p) => {
                         p.push(brother);
                         p.push_vec(parse_vec(sub_exp));
-                    },
-                    Type::ByteVectors(p)=>{
+                    }
+                    Type::ByteVectors(p) => {
                         p.push(as_u8(&brother));
-                        let v = parse_vec(sub_exp).iter().map(|x|as_u8(x)).collect::<Vec<u8>>();
+                        let v = parse_vec(sub_exp)
+                            .iter()
+                            .map(|x| as_u8(x))
+                            .collect::<Vec<u8>>();
                         p.push_vec(v);
                     }
                     _ => {}
@@ -82,7 +88,6 @@ fn parse_expr(expr: String) -> Type {
     }
     stack.pop().unwrap()
 }
-
 
 fn get_to_index(next_exp: &str) -> usize {
     // println!("________________________________________________________________{}", next_exp);
@@ -162,15 +167,15 @@ fn parse_atom(s: &str) -> Result<Type, String> {
                 )
             } else if s.starts_with("#\\") && s.len() == 2 {
                 Type::character_of(s.chars().nth(2).unwrap())
-            }else if s.starts_with(U8VEC_PREFIX) && s.len() > 4 {
+            } else if s.starts_with(U8VEC_PREFIX) && s.len() > 4 {
                 let v = parse0(s.replace(U8VEC_PREFIX, "("));
                 let r = match v {
                     Type::Lists(v) => v.data(),
                     _ => vec![v],
                 };
-                Type::u8vector_of(r.iter().map(|x|as_u8(x)).collect::<Vec<u8>>())
-            }  else if s.starts_with("#") && s.len() > 2 {
-                let v = parse0(s.replace("#", ""));
+                Type::u8vector_of(r.iter().map(|x| as_u8(x)).collect::<Vec<u8>>())
+            } else if s.starts_with(VEC_PREFIX) && s.len() > 2 {
+                let v = parse0(s.replace(VEC_PREFIX, "("));
                 let r = match v {
                     Type::Lists(v) => v.data(),
                     _ => vec![v],
@@ -209,11 +214,10 @@ fn peel_onions(s: &str, keys: Vec<&str>) -> Type {
     Type::Symbols(s.to_string())
 }
 
-
-fn as_u8(v:&Type)->u8{
+fn as_u8(v: &Type) -> u8 {
     match v {
-        Type::Numbers(v)=>{*v as u8},
-        Type::Characters(v)=>{*v as u8},
-        _=>{0},
+        Type::Numbers(v) => *v as u8,
+        Type::Characters(v) => *v as u8,
+        _ => 0,
     }
 }
