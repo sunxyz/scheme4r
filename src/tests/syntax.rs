@@ -22,9 +22,3 @@ fn test_syntax_rules2(){
     assert_eq!(r,"(set! v 1)");
 }
 
-#[test]
-fn test(){
-    // let r = format!("{}",eval("( 1 2 3 '(a  2 3 4 56 (a 8 9 4)) 1 3 5 '(4 5 6) '5 )").unwrap());
-    let r = format!("{}",eval("(quote 1)").unwrap());
-    assert_eq!(r,"(set! v 1)");
-}

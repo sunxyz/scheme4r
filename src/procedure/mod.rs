@@ -1,11 +1,13 @@
+mod apply;
+mod branch;
 mod define;
+mod eval;
 mod lambda;
 mod numbers;
-mod set;
 mod quote;
-mod branch;
- mod syntax;
- mod apply;
+mod set;
+mod syntax;
+mod types;
 use crate::{
     env::{Env, EnvOps},
     types::{
@@ -13,7 +15,7 @@ use crate::{
         refs::RefOps,
         Number,
         Type::{self, *},
-        *
+        *,
     },
 };
 
@@ -26,16 +28,17 @@ pub fn init_procedures(env: &mut Env) {
     branch::reg_procedure(env);
     syntax::reg_procedure(env);
     apply::reg_procedure(env);
+    eval::reg_procedure(env);
+    types::reg_procedure(env);
 }
 
 impl Env {
     fn reg_procedure(&mut self, name: &str, proc: fn(&mut ApplyArgs) -> Type) {
-        self. define(name, Type::procedure_of(name, proc));
+        self.define(name, Type::procedure_of(name, proc));
     }
-    fn reg_procedure0(&mut self, proc: Type){
-        if let Procedures(p) = proc.clone(){
-            self. define(p.get_name(), proc);
+    fn reg_procedure0(&mut self, proc: Type) {
+        if let Procedures(p) = proc.clone() {
+            self.define(p.get_name(), proc);
         }
     }
 }
-

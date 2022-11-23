@@ -15,7 +15,6 @@ pub type Character = char;
 pub type Strings = Refs<String>;
 pub type ByteVector = U8Vector;
 pub type Port = ();
-pub type  Quote = Box<Type>;
 #[derive(Debug, PartialEq)]
 pub enum Type {
     Numbers(Number),
@@ -31,7 +30,6 @@ pub enum Type {
     Records(Record),
     Ports(Port),
     Nil,
-    Quotes(Quote),
     Error(String)
 }
 
@@ -51,7 +49,6 @@ impl Clone for Type {
             Self::Records(arg0) => Self::Records(arg0.clone()),
             Self::Ports(arg0) => Self::Ports(arg0.clone()),
             Self::Nil => Self::Nil,
-            Self::Quotes(t)=>Self::Quotes(t.clone()),
             Self::Error(e)=>Self::Error(e.clone())
         }
     }
@@ -91,9 +88,6 @@ impl Type {
     pub fn error(data: &str) -> Type {
         Type::Error(data.to_string())
     }
-    pub fn quote(data: Type) -> Type {
-        Type::Quotes(Box::new(data))
-    }
     pub fn procedure_of(name: &str, f: fn(&mut ApplyArgs) -> Type) -> Type {
         let name = name.to_owned();
         Type::Procedures(Procedure::new(name, Rc::new(f)))
@@ -121,7 +115,6 @@ impl Display for Type {
             Type::Records(_) => write!(f, "<record>"),
             Type::Ports(_) => write!(f, "<port>",),
             Type::Nil => write!(f, "nil"),
-            Type::Quotes(t)=>write!(f, "'{}", t),
             Type::Error(e) => write!(f, "<error:{}>",e),
         }
     }

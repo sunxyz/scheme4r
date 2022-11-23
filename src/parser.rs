@@ -1,3 +1,4 @@
+use std::vec;
 
 use crate::types::List;
 
@@ -19,10 +20,10 @@ fn parse0(expr: &str) -> Type {
     let is_quote = expr.starts_with(QUOTE_PREFIX);
     let is_u8_vec = expr.starts_with(U8VEC_PREFIX);
     let is_push = expr.starts_with(PREFIX) || is_vec || is_u8_vec || is_quote;
-    if is_push{
+    if is_push {
         parse_expr(expr)
-    }else {
-        parse_atom(expr, false).unwrap()
+    } else {
+        parse_atom(expr).unwrap()
     }
 }
 
@@ -30,7 +31,6 @@ fn parse_expr(expr: &str) -> Type {
     let mut stack = Vec::new();
     let mut next = true;
     let mut exp = expr;
-    let mut is_quote_flag = false;
     while next {
         exp = exp.trim();
         let is_vec = exp.starts_with(VEC_PREFIX);
@@ -51,21 +51,20 @@ fn parse_expr(expr: &str) -> Type {
         // print!("sub_exp:{} next_exp:{} is_push:{} to_index:{}" , sub_exp, next_exp, is_push, to_index);
         if is_push {
             if is_u8_vec {
-                let v = parse_vec(sub_exp,is_quote_flag)
+                let v = parse_vec(sub_exp)
                     .iter()
                     .map(|x| as_u8(x))
                     .collect::<Vec<u8>>();
                 stack.push(Type::u8vector_of(v));
             } else if is_vec {
-                stack.push(Type::vector_of(parse_vec(sub_exp,is_quote_flag)));
-            } else if is_quote{
-                is_quote_flag = is_quote;
-                let v = parse_vec(sub_exp,is_quote_flag);
-                let mut vec = vec![Type::symbol("list")];
-                vec.extend(v);
+                stack.push(Type::vector_of(parse_vec(sub_exp)));
+            } else if is_quote {
+                let v = parse_vec(sub_exp);
+                let mut vec = vec![Type::symbol("quote")];
+                vec.push(Type::expr_of(v));
                 stack.push(Type::Lists(List::of_quote(vec)));
-            }else{
-                stack.push(Type::expr_of(parse_vec(sub_exp,is_quote_flag)));
+            } else {
+                stack.push(Type::expr_of(parse_vec(sub_exp)));
             }
         } else {
             let brother = stack.pop().unwrap();
@@ -75,19 +74,25 @@ fn parse_expr(expr: &str) -> Type {
                 let mut parent = stack.pop().unwrap();
                 match &mut parent {
                     Type::Lists(p) => {
-                        if p.is_quote(){
-                            is_quote_flag = false;
+                        if p.is_quote() {
+                            if let Type::Lists(d) = p.get_data().get_mut(1).unwrap() {
+                                d.push(brother);
+                                d.push_vec(parse_vec(sub_exp));
+                            }else{
+                                // skip error
+                            }
+                        } else {
+                            p.push(brother);
+                            p.push_vec(parse_vec(sub_exp));
                         }
-                        p.push(brother);
-                        p.push_vec(parse_vec(sub_exp,is_quote_flag));
                     }
                     Type::Vectors(p) => {
                         p.push(brother);
-                        p.push_vec(parse_vec(sub_exp,is_quote_flag));
+                        p.push_vec(parse_vec(sub_exp));
                     }
                     Type::ByteVectors(p) => {
                         p.push(as_u8(&brother));
-                        let v = parse_vec(sub_exp,is_quote_flag)
+                        let v = parse_vec(sub_exp)
                             .iter()
                             .map(|x| as_u8(x))
                             .collect::<Vec<u8>>();
@@ -140,11 +145,11 @@ fn get_to_index(next_exp: &str) -> usize {
     }
 }
 
-fn parse_vec(exp: &str, is_quote:bool) -> Vec<Type> {
+fn parse_vec(exp: &str) -> Vec<Type> {
     rep_str(exp.to_string())
         .trim()
         .split_whitespace()
-        .map(|s| parse_atom(s, is_quote).unwrap())
+        .map(|s| parse_atom(s).unwrap())
         .collect()
 }
 
@@ -171,19 +176,14 @@ fn rep_str(str: String) -> String {
     }
 }
 
-fn parse_atom(str: &str , is_quote:bool) -> Result<Type, String> {
-    let mut s = str.to_string();
-    if is_quote{
-        s=String::from("'")+s.as_str();
-    }
-    let s = &s[..];
+fn parse_atom(s: &str) -> Result<Type, String> {
     let t: Type = match s {
         "nil" => Type::Nil,
         "#t" => Type::Booleans(true),
         "#f" => Type::Booleans(false),
         _ => {
             if s.starts_with("'") {
-                Type::quote(parse0(&s.replace("'", "")))
+                Type::expr_of(vec![Type::symbol("quote"), parse0(&s.replace("'", ""))])
             } else if s.starts_with("\"") && s.ends_with("\"") && s.len() > 2 {
                 Type::string_of(
                     s[1..s.len() - 1]

@@ -1,3 +1,4 @@
+use std::cell::RefMut;
 use std::fmt::{Display, Formatter};
 
 use super::refs::{new, RefOps, Refs};
@@ -39,10 +40,10 @@ impl List {
     }
 
     pub fn is_expr(&self) -> bool {
-        if let ListType::EXPR = self.1 {
-            true
-        } else {
+        if let ListType::SUB = self.1  {
             false
+        } else {
+            true
         }
     }
 
@@ -60,6 +61,10 @@ impl List {
         } else {
             false
         }
+    }
+
+    pub(crate) fn get_data(&mut self) -> RefMut<Vec<Type>>{
+         self.0.ref_write()
     }
 
     pub fn push(&mut self, elem: Type) {
@@ -108,16 +113,31 @@ impl PartialEq for List {
 
 impl Display for List {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "({})",
-            self.0
-                .ref_read()
-                .iter()
-                .map(|x| x.to_string())
-                .collect::<Vec<String>>()
-                .join(" ")
-        )
+        if self.is_quote() && *self.0.ref_read().get(0).unwrap()==Type::symbol("quote") {
+            write!(
+                f,
+                "'{}",
+                self.0
+                    .ref_read()
+                    .iter().skip(1)
+                    .map(|x| x.to_string())
+                    .collect::<Vec<String>>()
+                    .join(" ")
+            )
+        }else{
+            write!(
+                f,
+                "({})",
+                self.0
+                    .ref_read()
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<String>>()
+                    .join(" ")
+            )
+        }
+        
+       
     }
 }
 

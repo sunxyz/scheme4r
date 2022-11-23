@@ -1,4 +1,5 @@
 
+
 use crate::{
     env::{Env, EnvOps, RefEnv},
     parser::parser,
@@ -18,25 +19,15 @@ pub fn eval(exp: &str) -> Result<Type, &str> {
     let env = Env::extend(root);
     let exp = parser(exp.to_string()).expect("parser error");
     // println!("exp:{}", exp);
-    Ok(match exp {
-        Lists(exp) => interpreter(exp, env),
-        _ => exp,
-    })
+    Ok(interpreter0(&exp, env))
 }
 
-pub fn interpreter(exp: SExpr, env: RefEnv) -> Type {
+pub fn interpreter(exp: &SExpr, env: RefEnv) -> Type {
     let car = exp.car();
     // println!("car: {}", car);
-    let cdr = exp.cdr();
+    let cdr = &exp.cdr();
     // println!("cdr: {} is-exp:{}", cdr, cdr.is_expr());
     match car {
-        Quotes(t) => {
-            if cdr.is_nil() {
-                *t.clone()
-            } else {
-                interpreter(cdr, env)
-            }
-        }
         Symbols(key) => {
             let v = env
                 .ref_read()
@@ -55,7 +46,7 @@ pub fn interpreter(exp: SExpr, env: RefEnv) -> Type {
             }
         }
         Lists(l) => {
-            let v = interpreter(l, env.clone());
+            let v = interpreter(&l, env.clone());
             if let Procedures(f) = v.clone() {
                 if exp.is_expr() {
                     // println!("exc0: {}", cdr);
@@ -80,7 +71,7 @@ pub fn interpreter(exp: SExpr, env: RefEnv) -> Type {
 
 fn apply(
     f: Procedure, //Func,//fn(&mut ApplyArgs) -> LispType,
-    cdr: List,
+    cdr: &SExpr,
     env: RefEnv,
 ) -> Type {
     let lazy_args_f: fn(List, RefEnv) -> List = |exp, e| {
@@ -92,7 +83,7 @@ fn apply(
     };
 
     f.call(&mut ApplyArgs::new(
-        cdr,
+        cdr.clone(),
         None,
         lazy_args_f,
         interpreter0,
@@ -102,7 +93,7 @@ fn apply(
 
 fn interpreter0(o: &Type, env: RefEnv) -> Type {
     match o {
-        Lists(l) => interpreter(l.clone(), env),
+        Lists(l) => interpreter(l, env),
         Symbols(s) => env
             .ref_read()
             .get(s.as_str())
