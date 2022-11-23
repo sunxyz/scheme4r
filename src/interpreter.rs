@@ -1,3 +1,4 @@
+
 use crate::{
     env::{Env, EnvOps, RefEnv},
     parser::parser,
@@ -29,6 +30,13 @@ pub fn interpreter(exp: SExpr, env: RefEnv) -> Type {
     let cdr = exp.cdr();
     // println!("cdr: {} is-exp:{}", cdr, cdr.is_expr());
     match car {
+        Quotes(t) => {
+            if cdr.is_nil() {
+                *t.clone()
+            } else {
+                interpreter(cdr, env)
+            }
+        }
         Symbols(key) => {
             let v = env
                 .ref_read()

@@ -70,6 +70,33 @@ impl ApplyArgs {
     pub fn env(&mut self) -> RefEnv {
         self.env.clone()
     }
+
+    pub fn apply(&mut self) -> Type {
+        let args = self.args();
+        if let Type::Procedures(f) = args.car() {
+            let args = args.cdr();
+            if args.is_nil() {
+                self.args = None;
+            } else {
+                let data = args.data();
+                if let Some(Type::Lists(last)) = data.last() {
+                    let a = args.data()[0..data.len() - 1].to_vec();
+                    let mut args = List::new();
+                    args.push_vec(a);
+                    args.push_vec(last.data().clone());
+                    // println!("apply: {}", args);
+                    self.args = Some(args);
+                } else {
+                    panic!("apply: invalid last argument");
+                }
+            }
+            f.call(self)
+        } else {
+            // panic!("apply: invalid argument");
+            let v  = args.car();
+            self.inter(& v)
+        }
+    }
 }
 
 impl Clone for ApplyArgs {

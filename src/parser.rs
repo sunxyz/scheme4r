@@ -1,35 +1,45 @@
+
+use crate::types::List;
+
 use super::types::Type;
 static VEC_PREFIX: &'static str = "#(";
+static QUOTE_PREFIX: &'static str = "'(";
 static U8VEC_PREFIX: &'static str = "#u8(";
 static PREFIX: &'static str = "(";
 static SUFFIX: &'static str = ")";
 
 pub fn parser(expr: String) -> Result<Type, String> {
-    let e = parse0(expr.replace("'", "\""));
+    let e = parse0(expr.trim());
     println!("parser:{}", e);
     Ok(e)
 }
 
-fn parse0(expr: String) -> Type {
-    if expr.starts_with(PREFIX) {
+fn parse0(expr: &str) -> Type {
+    let is_vec = expr.starts_with(VEC_PREFIX);
+    let is_quote = expr.starts_with(QUOTE_PREFIX);
+    let is_u8_vec = expr.starts_with(U8VEC_PREFIX);
+    let is_push = expr.starts_with(PREFIX) || is_vec || is_u8_vec || is_quote;
+    if is_push{
         parse_expr(expr)
-    } else {
-        parse_atom(&expr).unwrap()
+    }else {
+        parse_atom(expr, false).unwrap()
     }
 }
 
-fn parse_expr(expr: String) -> Type {
+fn parse_expr(expr: &str) -> Type {
     let mut stack = Vec::new();
     let mut next = true;
-    let mut exp = expr.as_str();
+    let mut exp = expr;
+    let mut is_quote_flag = false;
     while next {
         exp = exp.trim();
         let is_vec = exp.starts_with(VEC_PREFIX);
+        let is_quote = exp.starts_with(QUOTE_PREFIX);
         let is_u8_vec = exp.starts_with(U8VEC_PREFIX);
-        let is_push = exp.starts_with(PREFIX) || is_vec || is_u8_vec;
+        let is_push = exp.starts_with(PREFIX) || is_vec || is_u8_vec || is_quote;
         let index = if is_u8_vec {
             4
-        } else if is_vec {
+        } else if is_vec || is_quote {
             2
         } else {
             1
@@ -41,15 +51,21 @@ fn parse_expr(expr: String) -> Type {
         // print!("sub_exp:{} next_exp:{} is_push:{} to_index:{}" , sub_exp, next_exp, is_push, to_index);
         if is_push {
             if is_u8_vec {
-                let v = parse_vec(sub_exp)
+                let v = parse_vec(sub_exp,is_quote_flag)
                     .iter()
                     .map(|x| as_u8(x))
                     .collect::<Vec<u8>>();
                 stack.push(Type::u8vector_of(v));
             } else if is_vec {
-                stack.push(Type::vector_of(parse_vec(sub_exp)));
-            } else {
-                stack.push(Type::expr_of(parse_vec(sub_exp)));
+                stack.push(Type::vector_of(parse_vec(sub_exp,is_quote_flag)));
+            } else if is_quote{
+                is_quote_flag = is_quote;
+                let v = parse_vec(sub_exp,is_quote_flag);
+                let mut vec = vec![Type::symbol("list")];
+                vec.extend(v);
+                stack.push(Type::Lists(List::of_quote(vec)));
+            }else{
+                stack.push(Type::expr_of(parse_vec(sub_exp,is_quote_flag)));
             }
         } else {
             let brother = stack.pop().unwrap();
@@ -59,16 +75,19 @@ fn parse_expr(expr: String) -> Type {
                 let mut parent = stack.pop().unwrap();
                 match &mut parent {
                     Type::Lists(p) => {
+                        if p.is_quote(){
+                            is_quote_flag = false;
+                        }
                         p.push(brother);
-                        p.push_vec(parse_vec(sub_exp));
+                        p.push_vec(parse_vec(sub_exp,is_quote_flag));
                     }
                     Type::Vectors(p) => {
                         p.push(brother);
-                        p.push_vec(parse_vec(sub_exp));
+                        p.push_vec(parse_vec(sub_exp,is_quote_flag));
                     }
                     Type::ByteVectors(p) => {
                         p.push(as_u8(&brother));
-                        let v = parse_vec(sub_exp)
+                        let v = parse_vec(sub_exp,is_quote_flag)
                             .iter()
                             .map(|x| as_u8(x))
                             .collect::<Vec<u8>>();
@@ -91,11 +110,12 @@ fn parse_expr(expr: String) -> Type {
 
 fn get_to_index(next_exp: &str) -> usize {
     // println!("________________________________________________________________{}", next_exp);
-    let pre1 = next_exp.find(PREFIX);
-    let pre0 = next_exp.find(VEC_PREFIX);
+    let pre0 = next_exp.find(PREFIX);
+    let pre1 = next_exp.find(VEC_PREFIX);
     let pre2 = next_exp.find(U8VEC_PREFIX);
+    let pre3 = next_exp.find(QUOTE_PREFIX);
     // min
-    let mut t = vec![pre0, pre1, pre2]
+    let mut t = vec![pre0, pre1, pre2, pre3]
         .iter()
         .filter(|x| x.is_some())
         .map(|x| x.unwrap())
@@ -120,13 +140,17 @@ fn get_to_index(next_exp: &str) -> usize {
     }
 }
 
-fn parse_vec(exp: &str) -> Vec<Type> {
+fn parse_vec(exp: &str, is_quote:bool) -> Vec<Type> {
     rep_str(exp.to_string())
         .trim()
         .split_whitespace()
-        .map(|s| parse_atom(s).unwrap())
+        .map(|s| parse_atom(s, is_quote).unwrap())
         .collect()
 }
+
+// fn parse_vec(exp: &str) -> Vec<Type> {
+//     parse_vec0(exp, false)
+// }
 
 fn rep_str(str: String) -> String {
     if let Some(i) = str.find("'") {
@@ -147,16 +171,19 @@ fn rep_str(str: String) -> String {
     }
 }
 
-fn parse_atom(s: &str) -> Result<Type, String> {
+fn parse_atom(str: &str , is_quote:bool) -> Result<Type, String> {
+    let mut s = str.to_string();
+    if is_quote{
+        s=String::from("'")+s.as_str();
+    }
+    let s = &s[..];
     let t: Type = match s {
         "nil" => Type::Nil,
         "#t" => Type::Booleans(true),
         "#f" => Type::Booleans(false),
         _ => {
-            if s.starts_with("’") {
-                let v = s.replace("’", "");
-                let r = parse0(v.clone());
-                Type::expr_of(vec![Type::symbol_of(String::from("quote")), r])
+            if s.starts_with("'") {
+                Type::quote(parse0(&s.replace("'", "")))
             } else if s.starts_with("\"") && s.ends_with("\"") && s.len() > 2 {
                 Type::string_of(
                     s[1..s.len() - 1]
@@ -168,14 +195,14 @@ fn parse_atom(s: &str) -> Result<Type, String> {
             } else if s.starts_with("#\\") && s.len() == 2 {
                 Type::character_of(s.chars().nth(2).unwrap())
             } else if s.starts_with(U8VEC_PREFIX) && s.len() > 4 {
-                let v = parse0(s.replace(U8VEC_PREFIX, "("));
+                let v = parse0(&s.replace(U8VEC_PREFIX, "("));
                 let r = match v {
                     Type::Lists(v) => v.data(),
                     _ => vec![v],
                 };
                 Type::u8vector_of(r.iter().map(|x| as_u8(x)).collect::<Vec<u8>>())
             } else if s.starts_with(VEC_PREFIX) && s.len() > 2 {
-                let v = parse0(s.replace(VEC_PREFIX, "("));
+                let v = parse0(&s.replace(VEC_PREFIX, "("));
                 let r = match v {
                     Type::Lists(v) => v.data(),
                     _ => vec![v],

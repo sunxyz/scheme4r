@@ -19,6 +19,9 @@ impl  Procedure{
         let t = self.value.as_ref()(args);
         return t;
     }
+    pub fn get_name(&self) -> &str{
+        &self.name
+    }
 }
 
 impl Clone for Procedure{

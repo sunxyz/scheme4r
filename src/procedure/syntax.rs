@@ -1,46 +1,51 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
-use crate::eval;
 
 use super::*;
 // use crate::{env::Env, eval};
 // // syntax_rules 匹配到规则 然后套入变量 进行转换 得到一个表达式
 // // 转换后执行
-fn syntax_rules(args: &mut ApplyArgs) -> Type {
-    let expr = args.expr().clone();
+fn syntax_rules(expr: SExpr) -> Type {
     Type::procedure_of_rc(
         "syntax-rules",
         Rc::new(move |x| -> Type {
             let literal = expr.car();
+            let ignores = if let Type::Lists(ignore) = literal {ignore.data().iter().filter(|x| if let Type::Symbols(_)= x{true}else{false}).map(|t|if let Type::Symbols(v)= t{v.clone()}else{"NONE".to_string()}).collect::<HashSet<Symbol>>()} else {HashSet::new()};
             let rules = expr.cdr();
-            for rule in rules.data().iter(){
+           
+            let expr = x.expr();
+            // println!("rules:{}",rules);
+            // println!("expr:{}",expr);
+            for rule in rules.data().iter() {
+                
                 match rule {
-                    Type::Lists(r)=>{
-                        let sr_pattern =  r.car();
+                    Type::Lists(r) => {
+                        let sr_pattern = r.car();
                         let template = r.cdr().car();
-                        let expr = x.expr();
+                        // println!("sr_pattern：{}",sr_pattern);
                         let mut env = HashMap::new();
                         let is_render = match sr_pattern {
-                            Type::Lists(sr_pattern)=>{
-                                 is_match(expr, sr_pattern, &mut env, false)
-                            },
-                            _=>  false
+                            Type::Lists(sr_pattern) => is_match(expr, &sr_pattern, &mut env, false),
+                            _ => false,
                         };
                         if is_render {
                             if let Type::Lists(template) = template {
-                                return render(& template, &env);
+                                return render(&template, &env,&ignores);
                             }
                         }
-                    },
-                    _=>return Type::Nil
+                    }
+                    _ => return Type::Error(format!("check syntax-rules rules:{} ",rules)),
                 }
             }
-            Type::Nil
+            Type::Error(format!("check syntax-rules {} not pattern expr:{} ",rules, expr))
         }),
     )
 }
 // (x ... (y)) (1 (2))
-fn is_match(expr: &List, sr_pattern: List, e: &mut HashMap<Symbol, Type>, is_rev: bool) -> bool {
+fn is_match(expr: &List, sr_pattern: &List, e: &mut HashMap<Symbol, Type>, is_rev: bool) -> bool {
     let ellipsis_count = sr_pattern
         .data()
         .iter()
@@ -61,8 +66,6 @@ fn is_match(expr: &List, sr_pattern: List, e: &mut HashMap<Symbol, Type>, is_rev
     {
         return false;
     }
-    let mut expr = expr;
-    let mut sr_pattern = sr_pattern;
     // println!("expr {}", expr);
     // println!("sr_pattern {}", sr_pattern);
     let car = sr_pattern.car();
@@ -81,26 +84,24 @@ fn is_match(expr: &List, sr_pattern: List, e: &mut HashMap<Symbol, Type>, is_rev
                     e.insert(v, Type::Lists(data));
                     return true;
                 } else {
-                    let mut t = expr.data();
-                    t.reverse();
-                    expr = &List::of(t);
-                    let mut t = sr_pattern.data();
-                    t.reverse();
-                    sr_pattern = List::of(t);
-                    return is_match(expr, sr_pattern, e, true);
+                    let mut expr_data = expr.data();
+                    expr_data.reverse();
+                    let mut sr_pattern_data = sr_pattern.data();
+                    sr_pattern_data.reverse();
+                    return is_match(&List::of(expr_data), &List::of(sr_pattern_data), e, true);
                 }
             } else if &v == "_" {
-                return is_match(&mut expr.cdr(), sr_pattern.cdr(), e, is_rev);
+                return is_match(&expr.cdr(), &sr_pattern.cdr(), e, is_rev);
             } else {
                 e.insert(v, value);
-                return is_match(&mut expr.cdr(), sr_pattern.cdr(), e, is_rev);
+                return is_match(&expr.cdr(), &sr_pattern.cdr(), e, is_rev);
             }
         }
         Type::Lists(p) => {
             if let Type::Lists(v) = value {
-                let r = is_match(&mut v.clone(), p, e, is_rev);
+                let r = is_match(&v, &p, e, is_rev);
                 if r {
-                    return is_match(&mut expr.cdr(), sr_pattern.cdr(), e, is_rev);
+                    return is_match(&expr.cdr(), &sr_pattern.cdr(), e, is_rev);
                 } else {
                     return false;
                 }
@@ -112,86 +113,98 @@ fn is_match(expr: &List, sr_pattern: List, e: &mut HashMap<Symbol, Type>, is_rev
     };
 }
 
-fn render(template: &List, env: &HashMap<Symbol, Type>) -> Type {
+fn render(template: &List, env: &HashMap<Symbol, Type>, ignores: &HashSet<Symbol>) -> Type {
     let mut r = List::new();
     for item in template.data().iter() {
         match item {
             Type::Symbols(s) => {
-                let v = if env.contains_key(s) {
+                let v = if env.contains_key(s) && !ignores.contains(s) {
                     env.get(s).unwrap()
                 } else {
                     item
                 };
                 r.push(v.clone())
             }
-            Type::Lists(l) => r.push(render(l, env)),
+            Type::Lists(l) => r.push(render(l, env, ignores)),
             _ => r.push(item.clone()),
         }
     }
     Type::Lists(r)
 }
 
-#[test]
-pub fn test_is_match() {
-    let pattern = eval("’(x ... y)").unwrap();
-    let args = eval("’(1 2 3 4 5)").unwrap();
-    if let Type::Lists(pattern) = pattern {
-        if let Type::Lists(args) = args {
-            let mut e = HashMap::new();
-            println!(
-                "{} = {} ? => {}",
-                pattern,
-                args,
-                is_match(&mut args, pattern.clone(), &mut e, false)
-            );
-            for ele in e {
-                println!("{}=>{}", ele.0, ele.1);
-            }
-        }
-    }
+pub fn reg_procedure(env: &mut Env) {
+    env.reg_procedure("syntax-rules", |args|syntax_rules(args.expr().clone()));
 }
 
-#[test]
-pub fn test_is_match2() {
-    let pattern = eval("’((x z _ _) ... y)").unwrap();
-    let args = eval("’((1 3 6 9) 2 3 4 5)").unwrap();
-    if let Type::Lists(pattern) = pattern {
-        if let Type::Lists(args) = args {
-            let mut e = HashMap::new();
-            println!(
-                "{} = {} ? => {}",
-                pattern,
-                args,
-                is_match(&mut args, pattern.clone(), &mut e, false)
-            );
-            for ele in e {
-                println!("{}=>{}", ele.0, ele.1);
-            }
-        }
-    }
-}
 
-#[test]
-pub fn test_render() {
-    let pattern = eval("’(x ... y)").unwrap();
-    let args = eval("’(1 2 3 4 5)").unwrap();
-    let template = eval("’(if (> x y) (y) ...)").unwrap();
-    if let Type::Lists(pattern) = pattern {
-        if let Type::Lists(args) = args {
-            let mut e = HashMap::new();
-            println!(
-                "{} = {} ? => {}",
-                pattern,
-                args,
-                is_match(&mut args, pattern.clone(), &mut e, false)
-            );
-            for ele in e.clone() {
-                println!("{}=>{}", ele.0, ele.1);
-            }
-            if let Type::Lists(template) = template {
-                let v = render(&template, &e);
-                println!("render {} => {}", template, v);
+#[cfg(test)]
+mod tests{
+    use super::*;
+    use crate::eval;
+    #[test]
+    pub fn test_is_match() {
+    
+        let pattern = eval("’(x ... y)").unwrap();
+        let args = eval("’(1 2 3 4 5)").unwrap();
+        if let Type::Lists(pattern) = pattern {
+            if let Type::Lists(args) = args {
+                let mut e = HashMap::new();
+                println!(
+                    "{} = {} ? => {}",
+                    pattern,
+                    args,
+                    is_match(&args, &pattern, &mut e, false)
+                );
+                for ele in e {
+                    println!("{}=>{}", ele.0, ele.1);
+                }
             }
         }
     }
+    
+    #[test]
+    pub fn test_is_match2() {
+        let pattern = eval("’((x z _ _) ... y)").unwrap();
+        let args = eval("’((1 3 6 9) 2 3 4 5)").unwrap();
+        if let Type::Lists(pattern) = pattern {
+            if let Type::Lists(args) = args {
+                let mut e = HashMap::new();
+                println!(
+                    "{} = {} ? => {}",
+                    pattern,
+                    args,
+                    is_match(&args, &pattern, &mut e, false)
+                );
+                for ele in e {
+                    println!("{}=>{}", ele.0, ele.1);
+                }
+            }
+        }
+    }
+    
+    #[test]
+    pub fn test_render() {
+        let pattern = eval("’((x) ... y)").unwrap();
+        let args = eval("’(1 2 3 4 5)").unwrap();
+        let template = eval("’(if (> x y) (y) ...)").unwrap();
+        if let Type::Lists(pattern) = pattern {
+            if let Type::Lists(args) = args {
+                let mut e = HashMap::new();
+                println!(
+                    "{} = {} ? => {}",
+                    pattern,
+                    args,
+                    is_match(&args, &pattern, &mut e, false)
+                );
+                for ele in e.clone() {
+                    println!("{}=>{}", ele.0, ele.1);
+                }
+                if let Type::Lists(template) = template {
+                    let v = render(&template, &e, &HashSet::new());
+                    println!("render {} => {}", template, v);
+                }
+            }
+        }
+    }
+
 }

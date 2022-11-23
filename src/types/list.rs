@@ -7,6 +7,7 @@ use super::types::Type;
 pub enum ListType {
     SUB,
     EXPR,
+    QUOTE,
 }
 #[derive(Debug)]
 pub struct List(Refs<Vec<Type>>, ListType);
@@ -18,6 +19,10 @@ impl List {
 
     pub fn of(elem_s: Vec<Type>) -> Self {
         List(new(elem_s), ListType::EXPR)
+    }
+
+    pub(crate) fn of_quote(elem_s: Vec<Type>) -> Self {
+        List(new(elem_s), ListType::QUOTE)
     }
 
     pub fn car(&self) -> Type {
@@ -43,6 +48,14 @@ impl List {
 
     pub fn is_sub(&self) -> bool {
         if let ListType::SUB = self.1 {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn is_quote(&self) -> bool {
+        if let ListType::QUOTE = self.1 {
             true
         } else {
             false
@@ -113,6 +126,7 @@ impl Clone for ListType {
         match self {
             Self::SUB => Self::SUB,
             Self::EXPR => Self::EXPR,
+            Self::QUOTE=>Self::QUOTE,
         }
     }
 }
