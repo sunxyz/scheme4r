@@ -90,6 +90,7 @@ impl ApplyArgs {
                     panic!("apply: invalid last argument");
                 }
             }
+            println!("---{}",self.args());
             f.call(self)
         } else {
             // panic!("apply: invalid argument");

@@ -3,6 +3,7 @@ use std::{
     rc::Rc,
 };
 
+use crate::{env::RefEnv, eval};
 
 use super::*;
 // use crate::{env::Env, eval};
@@ -13,14 +14,34 @@ fn syntax_rules(expr: SExpr) -> Type {
         "syntax-rules",
         Rc::new(move |x| -> Type {
             let literal = expr.car();
-            let ignores = if let Type::Lists(ignore) = literal {ignore.data().iter().filter(|x| if let Type::Symbols(_)= x{true}else{false}).map(|t|if let Type::Symbols(v)= t{v.clone()}else{"NONE".to_string()}).collect::<HashSet<Symbol>>()} else {HashSet::new()};
+            let ignores = if let Type::Lists(ignore) = literal {
+                ignore
+                    .data()
+                    .iter()
+                    .filter(|x| {
+                        if let Type::Symbols(_) = x {
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|t| {
+                        if let Type::Symbols(v) = t {
+                            v.clone()
+                        } else {
+                            "NONE".to_string()
+                        }
+                    })
+                    .collect::<HashSet<Symbol>>()
+            } else {
+                HashSet::new()
+            };
             let rules = expr.cdr();
-           
+
             let expr = x.expr();
             // println!("rules:{}",rules);
-            // println!("expr:{}",expr);
+            println!("expr:{}",expr);
             for rule in rules.data().iter() {
-                
                 match rule {
                     Type::Lists(r) => {
                         let sr_pattern = r.car();
@@ -33,16 +54,51 @@ fn syntax_rules(expr: SExpr) -> Type {
                         };
                         if is_render {
                             if let Type::Lists(template) = template {
-                                return render(&template, &env,&ignores);
+                                return render(&template, &env, &ignores);
                             }
                         }
                     }
-                    _ => return Type::Error(format!("check syntax-rules rules:{} ",rules)),
+                    _ => return Type::Error(format!("check syntax-rules rules:{} ", rules)),
                 }
             }
-            Type::Error(format!("check syntax-rules {} not pattern expr:{} ",rules, expr))
+            Type::Error(format!(
+                "check syntax-rules {} not pattern expr:{} ",
+                rules, expr
+            ))
         }),
     )
+}
+
+
+// fn define_syntax(args:&mut ApplyArgs) ->Type{
+//     let name = args.expr().car();
+//     let expr = args.expr().cdr();
+//     let 
+// }
+
+fn define_syntax( a:&mut ApplyArgs) -> Type {
+    let name = if let Symbols(n)= a.expr().car(){n}else{"".to_string()};
+    if name.is_empty(){
+        return Type::Error(format!("check define-syntax name :{}", a.expr().car()));
+    }
+    let rules = a.expr().cdr();
+    let f = a.inter(&Type::Lists(rules));
+    let proc = Type::procedure_of_rc(
+        name.as_str(),
+        Rc::new(move |args: &mut ApplyArgs| -> Type {
+            if let Type::Procedures(p) = f.clone() {
+            //    let d =  args.expr().data();
+            //     let list = List::new();
+            //     let mut args0 = args.clone_of()
+                println!(";;;{}",args.expr());
+                let v = p.call(&mut args0);
+                return args0.inter(&v);
+            }
+            Nil
+        }),
+    );
+    a.env().ref_write().define(name.as_str(), proc);
+    Nil
 }
 // (x ... (y)) (1 (2))
 fn is_match(expr: &List, sr_pattern: &List, e: &mut HashMap<Symbol, Type>, is_rev: bool) -> bool {
@@ -133,17 +189,16 @@ fn render(template: &List, env: &HashMap<Symbol, Type>, ignores: &HashSet<Symbol
 }
 
 pub fn reg_procedure(env: &mut Env) {
-    env.reg_procedure("syntax-rules", |args|syntax_rules(args.expr().clone()));
+    env.reg_procedure("syntax-rules", |args| syntax_rules(args.expr().clone()));
+    env.reg_procedure("define-syntax", define_syntax);
 }
 
-
 #[cfg(test)]
-mod tests{
+mod tests {
     use super::*;
     use crate::eval;
     #[test]
     pub fn test_is_match() {
-    
         let pattern = eval("’(x ... y)").unwrap();
         let args = eval("’(1 2 3 4 5)").unwrap();
         if let Type::Lists(pattern) = pattern {
@@ -161,7 +216,7 @@ mod tests{
             }
         }
     }
-    
+
     #[test]
     pub fn test_is_match2() {
         let pattern = eval("’((x z _ _) ... y)").unwrap();
@@ -181,7 +236,7 @@ mod tests{
             }
         }
     }
-    
+
     #[test]
     pub fn test_render() {
         let pattern = eval("’((x) ... y)").unwrap();
@@ -206,5 +261,4 @@ mod tests{
             }
         }
     }
-
 }
