@@ -75,7 +75,7 @@ impl List {
         self.0.ref_write().extend(elem);
     }
 
-    pub fn push_all(&mut self, elem: List) {
+    pub fn push_all(&mut self, elem: &List) {
         self.0.ref_write().extend(elem.data());
     }
 

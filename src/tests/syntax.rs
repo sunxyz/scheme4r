@@ -25,7 +25,7 @@ fn test_syntax_rules2(){
 
 #[test]
 fn test_define_syntax_rules(){
-    let r = format!("{}",eval("((define v 6)(define-syntax r (syntax-rules()((_ x ) (set! x nil)) ((_ x y) (set! x y))))(r v v 1) v)").unwrap());
+    let r = format!("{}",eval("((define v 6)(define-syntax r (syntax-rules()((_ x ) (set! x nil)) ((_ x y) (set! x y))))(r v 1) v)").unwrap());
     // println!("--00 {}",eval("(apply '(test v 1))").unwrap());
     assert_eq!(r,"1");
 }
@@ -60,4 +60,40 @@ fn test_define_syntax_rules_when(){
     let r = format!("{}",eval("((define-syntax when (syntax-rules() ((_ b p) (if b p))))(when (+ 1 2 3) 6))").unwrap());
     // println!("--00 {}",eval("(apply '(test v 1))").unwrap());
     assert_eq!(r,"6");
+}
+
+#[test]
+fn test_define_syntax_rules_and(){
+    let r = format!("{}",eval("((define-syntax and (syntax-rules() ((_ a)(a)) ((_ a b) (if a b a)) ((_ a b ...) (if a (and b ...) a))))(and #t #t #t #t))").unwrap());
+    // println!("--00 {}",eval("(apply '(test v 1))").unwrap());
+    assert_eq!(r,"#t");
+}
+
+#[test]
+fn test_define_syntax_rules_and_1(){
+    let r = format!("{}",eval("((define-syntax and (syntax-rules() ((_ a)(a)) ((_ a b) (if a b a)) ((_ a b ...) (if a (and b ...) a))))(and #t #t #t #f))").unwrap());
+    assert_eq!(r,"#f");
+    let r = format!("{}",eval("((define-syntax and (syntax-rules() ((_ a)(a)) ((_ a b) (if a b a)) ((_ a b ...) (if a (and b ...) a))))(and #t #f #t #t))").unwrap());
+    assert_eq!(r,"#f");
+    let r = format!("{}",eval("((define-syntax and (syntax-rules() ((_ a)(a)) ((_ a b) (if a b a)) ((_ a b ...) (if a (and b ...) a))))(and #t 0 #t #t))").unwrap());
+    assert_eq!(r,"0");
+    let r = format!("{}",eval("((define-syntax and (syntax-rules() ((_ a)(a)) ((_ a b) (if a b a)) ((_ a b ...) (if a (and b ...) a))))(and #t 1 #t (list 1 2 3)))").unwrap());
+    assert_eq!(r,"(1 2 3)");
+}
+
+#[test]
+fn test_define_syntax_rules_or(){
+    let r = format!("{}",eval("((define-syntax or (syntax-rules() ((_ a)(a)) ((_ a b) (if a a b)) ((_ a b ...) (if a a (or b ...)))))(or #f #f #t #t))").unwrap());
+    assert_eq!(r,"#t");
+    let r = format!("{}",eval("((define-syntax or (syntax-rules() ((_ a)(a)) ((_ a b) (if a a b)) ((_ a b ...) (if a a (or b ...)))))(or #f #f #f))").unwrap());
+    assert_eq!(r,"#f");
+    let r = format!("{}",eval("((define-syntax or (syntax-rules() ((_ a)(a)) ((_ a b) (if a a b)) ((_ a b ...) (if a a (or b ...)))))(or #f (list 1 2 3) #f))").unwrap());
+    assert_eq!(r,"(1 2 3)");
+}
+
+
+#[test]
+fn test_define_syntax_rules_not(){
+    let r = format!("{}",eval("((define-syntax not (syntax-rules() ((_ a)(if a #f #t))))(not #f))").unwrap());
+    assert_eq!(r,"#t");
 }

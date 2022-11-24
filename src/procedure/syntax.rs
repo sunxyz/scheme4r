@@ -179,7 +179,15 @@ fn render(template: &List, env: &HashMap<Symbol, Type>, ignores: &HashSet<Symbol
                 } else {
                     item
                 };
-                r.push(v.clone())
+                if s=="..."{
+                    if let Lists(l) = v{
+                        r.push_all(l)
+                    }else {
+                        r.push(v.clone())
+                    }
+                }else{
+                    r.push(v.clone())
+                }
             }
             Type::Lists(l) => r.push(render(l, env, ignores)),
             _ => r.push(item.clone()),
