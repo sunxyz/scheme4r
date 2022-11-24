@@ -55,3 +55,9 @@ fn test_define_syntax_rules_4(){
     assert_eq!(r,"6");
 }
 
+#[test]
+fn test_define_syntax_rules_when(){
+    let r = format!("{}",eval("((define-syntax when (syntax-rules() ((_ b p) (if b p))))(when (+ 1 2 3) 6))").unwrap());
+    // println!("--00 {}",eval("(apply '(test v 1))").unwrap());
+    assert_eq!(r,"6");
+}
