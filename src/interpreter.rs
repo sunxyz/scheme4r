@@ -32,7 +32,7 @@ pub fn interpreter(exp: &SExpr, env: RefEnv) -> Type {
             let v = env
                 .ref_read()
                 .get(key.as_str())
-                .expect(format!("undefined symbol: {}", key).as_str());
+                .expect(format!("Undefined variable: {}", key).as_str());
             if let Procedures(f) = v.clone() {
                 if exp.is_expr() {
                     // println!("exc: {}", cdr);
