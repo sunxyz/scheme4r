@@ -36,9 +36,4 @@ impl Env {
     fn reg_procedure(&mut self, name: &str, proc: fn(&mut ApplyArgs) -> Type) {
         self.define(name, Type::procedure_of(name, proc));
     }
-    fn reg_procedure0(&mut self, proc: Type) {
-        if let Procedures(p) = proc.clone() {
-            self.define(p.get_name(), proc);
-        }
-    }
 }

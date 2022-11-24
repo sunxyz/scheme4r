@@ -35,24 +35,23 @@ fn test_define_syntax_rules(){
 #[test]
 #[should_panic]
 fn test_define_syntax_rules_2(){
-    let r = format!("{}",eval("((define z 6)(define-syntax r (syntax-rules()((_ x ) (set! x nil)) ((_ x y) (set! x y))))(r v v 1) v)").unwrap());
+    let r = format!("{}",eval("((define z 6)(define-syntax r (syntax-rules()((_ x ) (set! x nil)) ((_ x y) (set! x y))))(r v 1) v)").unwrap());
     // println!("--00 {}",eval("(apply '(test v 1))").unwrap());
     assert_eq!(r,"1");
 }
 
 #[test]
-#[should_panic]
 fn test_define_syntax_rules_3(){
     let r = format!("{}",eval("((define-syntax r (syntax-rules()((_ x ) (set! x nil)) ((_ x y) (set! x y))))(r v v 1 6 9))").unwrap());
     // println!("--00 {}",eval("(apply '(test v 1))").unwrap());
-    assert_eq!(r,"1");
+    assert_eq!(r,"<error:check syntax-rules (((_ x) (set! x nil)) ((_ x y) (set! x y))) not pattern expr:(r v v 1 6 9) >");
 }
 
 
 #[test]
 fn test_define_syntax_rules_4(){
-    let r = format!("{}",eval("((define v 0)(define-syntax r (syntax-rules()((_ x ) (set! x nil)) ((_ x y) (set! x y))))(r v 6))").unwrap());
+    let r = format!("{}",eval("((define v 0)(define-syntax r (syntax-rules()((_ x ) (set! x nil)) ((_ x y) (set! x y))))(r v 6) v)").unwrap());
     // println!("--00 {}",eval("(apply '(test v 1))").unwrap());
-    assert_eq!(r,"1");
+    assert_eq!(r,"6");
 }
 

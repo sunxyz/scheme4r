@@ -2,9 +2,6 @@ use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
 };
-
-use crate::{env::RefEnv, eval};
-
 use super::*;
 // use crate::{env::Env, eval};
 // // syntax_rules 匹配到规则 然后套入变量 进行转换 得到一个表达式
@@ -83,21 +80,24 @@ fn define_syntax( a:&mut ApplyArgs) -> Type {
     }
     let rules = a.expr().cdr();
     let f = a.inter(&Type::Lists(rules));
+    let k = name.clone();
     let proc = Type::procedure_of_rc(
-        name.as_str(),
+        k.as_str(),
         Rc::new(move |args: &mut ApplyArgs| -> Type {
             if let Type::Procedures(p) = f.clone() {
-            //    let d =  args.expr().data();
-            //     let list = List::new();
-            //     let mut args0 = args.clone_of()
-                println!(";;;{}",args.expr());
+               let d =  args.expr().data();
+                let mut list = List::new();
+                list.push(Type::symbol(name.as_str()));
+                list.push_vec(d);
+                let mut args0 = args.clone_of(Some(list));
+                // println!(";;;{}",args0.expr());
                 let v = p.call(&mut args0);
                 return args0.inter(&v);
             }
             Nil
         }),
     );
-    a.env().ref_write().define(name.as_str(), proc);
+    a.env().ref_write().define(k.as_str(), proc);
     Nil
 }
 // (x ... (y)) (1 (2))
