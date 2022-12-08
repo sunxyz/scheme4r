@@ -20,12 +20,6 @@
 
 ### use
 - Support cmd and api , can embeddable
-```
-cargo run
-```
-```
-cargo build
-```
 **api**
 ```
 use scheme::eval;
@@ -36,12 +30,6 @@ console
 ```
 6
 ```
-**cmd**
-```
-> (+ 1 2 3)
-6
-```
-
 ### learn docs
 - [r7rs.org](https://small.r7rs.org/)
 - [r7rs-overview.pdf](https://small.r7rs.org/attachment/overview.pdf)
