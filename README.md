@@ -18,6 +18,9 @@
 - Records 
 - Ports
 
+### more feature
+- macro (deinfe-syntax syntax-rules)
+
 ### use
 - Support cmd and api , can embeddable
 **api**
