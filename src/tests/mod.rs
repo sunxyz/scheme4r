@@ -1,4 +1,4 @@
-mod numbers;
+mod types;
 mod base;
 mod define;
 mod lambda;

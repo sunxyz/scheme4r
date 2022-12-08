@@ -3,7 +3,6 @@ mod branch;
 mod define;
 mod eval;
 mod lambda;
-mod numbers;
 mod quote;
 mod set;
 mod syntax;
@@ -20,7 +19,7 @@ use crate::{
 };
 
 pub fn init_procedures(env: &mut Env) {
-    numbers::reg_procedures(env);
+    
     define::reg_procedures(env);
     lambda::reg_procedures(env);
     set::reg_procedures(env);
