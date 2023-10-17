@@ -13,6 +13,7 @@ fn test_number() {
 }
 #[test]
 fn test_quote() {
+    print!("{}", "[".len());
     assert_eq!(eval("’3").unwrap().to_string(), "3");
     assert_eq!(eval("(quote 3)").unwrap().to_string(), "3");
     assert_eq!(eval("(quote 3)").unwrap(), eval("’3").unwrap());
