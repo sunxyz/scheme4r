@@ -4,7 +4,7 @@ use crate::types::List;
 
 use super::types::Type;
 static VEC_PREFIX: &'static str = "#(";
-static QUOTE_PREFIX: &'static str = "'(";
+static QUOTE_PREFIX: &'static str = "’(";
 static U8VEC_PREFIX: &'static str = "#u8(";
 static PREFIX: &'static str = "(";
 static SUFFIX: &'static str = ")";
@@ -37,9 +37,9 @@ fn parse_expr(expr: &str) -> Type {
         let is_quote = exp.starts_with(QUOTE_PREFIX);
         let is_u8_vec = exp.starts_with(U8VEC_PREFIX);
         let is_push = exp.starts_with(PREFIX) || is_vec || is_u8_vec || is_quote;
-        let index = if is_u8_vec {
+        let index = if is_u8_vec || is_quote {
             4
-        } else if is_vec || is_quote {
+        } else if is_vec {
             2
         } else {
             1
@@ -78,7 +78,7 @@ fn parse_expr(expr: &str) -> Type {
                             if let Type::Lists(d) = p.get_data().get_mut(1).unwrap() {
                                 d.push(brother);
                                 d.push_vec(parse_vec(sub_exp));
-                            }else{
+                            } else {
                                 // skip error
                             }
                         } else {
@@ -182,8 +182,8 @@ fn parse_atom(s: &str) -> Result<Type, String> {
         "#t" => Type::Booleans(true),
         "#f" => Type::Booleans(false),
         _ => {
-            if s.starts_with("'") {
-                Type::expr_of(vec![Type::symbol("quote"), parse0(&s.replace("'", ""))])
+            if s.starts_with("’") {
+                Type::expr_of(vec![Type::symbol("quote"), parse0(&s.replace("’", ""))])
             } else if s.starts_with("\"") && s.ends_with("\"") && s.len() > 2 {
                 Type::string_of(
                     s[1..s.len() - 1]

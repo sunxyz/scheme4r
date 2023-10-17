@@ -4,7 +4,9 @@ use super::{
 };
 use std::{fmt::Display, rc::Rc};
 
-pub use super::{list::List, procedure::Procedure, record::Record, vector::Vector, u8vector::U8Vector};
+pub use super::{
+    list::List, procedure::Procedure, record::Record, u8vector::U8Vector, vector::Vector,
+};
 
 pub type Number = isize;
 pub type Boolean = bool;
@@ -19,18 +21,18 @@ pub type Port = ();
 pub enum Type {
     Numbers(Number),
     Booleans(Boolean),
-    Pairs(Pair),
-    Lists(SExpr),
     Symbols(Symbol),
     Characters(Character),
     Strings(Strings),
+    Pairs(Pair),
+    Lists(SExpr),
     Vectors(Vector),
     ByteVectors(ByteVector),
     Procedures(Procedure),
     Records(Record),
     Ports(Port),
+    Error(String),
     Nil,
-    Error(String)
 }
 
 impl Clone for Type {
@@ -49,7 +51,7 @@ impl Clone for Type {
             Self::Records(arg0) => Self::Records(arg0.clone()),
             Self::Ports(arg0) => Self::Ports(arg0.clone()),
             Self::Nil => Self::Nil,
-            Self::Error(e)=>Self::Error(e.clone())
+            Self::Error(e) => Self::Error(e.clone()),
         }
     }
 }
@@ -100,7 +102,7 @@ impl Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::Numbers(n) => write!(f, "{}", n),
-            Type::Booleans(n) => write!(f, "{}", if *n {"#t"}else{"#f"}),
+            Type::Booleans(n) => write!(f, "{}", if *n { "#t" } else { "#f" }),
             Type::Pairs(n) => {
                 let n = n.borrow();
                 write!(f, "({},{})", n.0, n.1)
@@ -115,7 +117,7 @@ impl Display for Type {
             Type::Records(_) => write!(f, "<record>"),
             Type::Ports(_) => write!(f, "<port>",),
             Type::Nil => write!(f, "nil"),
-            Type::Error(e) => write!(f, "<error:{}>",e),
+            Type::Error(e) => write!(f, "<error:{}>", e),
         }
     }
 }
