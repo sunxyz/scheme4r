@@ -1,6 +1,6 @@
 use std::{error::Error, fmt};
 
-use crate::reader::span::Span;
+use crate::{reader::span::Span, runtime::Value};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -10,13 +10,21 @@ pub enum ErrorKind {
     Type,
     Arity,
     Name,
+    Io,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
+pub enum ControlSignal {
+    ContinuationJump { token: usize, value: Value },
+    Raised { object: Value, continuable: bool },
+}
+
+#[derive(Clone, Debug)]
 pub struct SchemeError {
     pub kind: ErrorKind,
     pub message: String,
     pub span: Option<Span>,
+    pub signal: Option<ControlSignal>,
 }
 
 impl SchemeError {
@@ -25,6 +33,7 @@ impl SchemeError {
             kind,
             message: message.into(),
             span,
+            signal: None,
         }
     }
 
@@ -51,6 +60,52 @@ impl SchemeError {
     pub fn name(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Name, message, None)
     }
+
+    pub fn io(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Io, message, None)
+    }
+
+    pub fn raised(object: Value, continuable: bool) -> Self {
+        Self {
+            kind: ErrorKind::Runtime,
+            message: if continuable {
+                "continuable exception raised".to_string()
+            } else {
+                "exception raised".to_string()
+            },
+            span: None,
+            signal: Some(ControlSignal::Raised {
+                object,
+                continuable,
+            }),
+        }
+    }
+
+    pub fn continuation_jump(token: usize, value: Value) -> Self {
+        Self {
+            kind: ErrorKind::Runtime,
+            message: "continuation jump".to_string(),
+            span: None,
+            signal: Some(ControlSignal::ContinuationJump { token, value }),
+        }
+    }
+
+    pub fn as_raised(&self) -> Option<(&Value, bool)> {
+        match &self.signal {
+            Some(ControlSignal::Raised {
+                object,
+                continuable,
+            }) => Some((object, *continuable)),
+            _ => None,
+        }
+    }
+
+    pub fn as_continuation_jump(&self) -> Option<(usize, &Value)> {
+        match &self.signal {
+            Some(ControlSignal::ContinuationJump { token, value }) => Some((*token, value)),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for SchemeError {
@@ -67,3 +122,44 @@ impl fmt::Display for SchemeError {
 }
 
 impl Error for SchemeError {}
+
+impl PartialEq for ControlSignal {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::ContinuationJump {
+                    token: left_token,
+                    value: left_value,
+                },
+                Self::ContinuationJump {
+                    token: right_token,
+                    value: right_value,
+                },
+            ) => left_token == right_token && Value::equal(left_value, right_value),
+            (
+                Self::Raised {
+                    object: left_object,
+                    continuable: left_continuable,
+                },
+                Self::Raised {
+                    object: right_object,
+                    continuable: right_continuable,
+                },
+            ) => left_continuable == right_continuable && Value::equal(left_object, right_object),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ControlSignal {}
+
+impl PartialEq for SchemeError {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.message == other.message
+            && self.span == other.span
+            && self.signal == other.signal
+    }
+}
+
+impl Eq for SchemeError {}

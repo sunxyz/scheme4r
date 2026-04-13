@@ -6,8 +6,14 @@ pub enum TokenKind {
     RParen,
     Dot,
     Quote,
+    Quasiquote,
+    Unquote,
+    UnquoteSplicing,
+    VectorStart,
+    ByteVectorStart,
     Boolean(bool),
     Number(i64),
+    Character(char),
     String(String),
     Symbol(String),
     Eof,
@@ -17,10 +23,17 @@ pub enum TokenKind {
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
+    pub start: usize,
+    pub end: usize,
 }
 
 impl Token {
-    pub const fn new(kind: TokenKind, span: Span) -> Self {
-        Self { kind, span }
+    pub const fn new(kind: TokenKind, span: Span, start: usize, end: usize) -> Self {
+        Self {
+            kind,
+            span,
+            start,
+            end,
+        }
     }
 }

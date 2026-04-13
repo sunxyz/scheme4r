@@ -25,13 +25,23 @@
 - Support cmd and api , can embeddable
 **api**
 ```
-use scheme::eval;
-let v = eval("(+ 1 2 3)");
+use scheme4r::{Environment, Scheme};
+
+let scheme = Scheme::new(Environment::standard());
+let v = scheme.eval("(+ 1 2 3)")?;
 println!("{}",v);
 ```
 console
 ```
 6
+```
+
+shortcut
+```
+use scheme4r::eval;
+
+let v = eval("(+ 1 2 3)")?;
+println!("{}", v);
 ```
 ### learn docs
 - [r7rs.org](https://small.r7rs.org/)
