@@ -12,4 +12,5 @@ pub use error_object::{ErrorObject, ErrorObjectKind, ErrorObjectRef};
 pub use library::Library;
 pub use parameter::{ParameterObject, ParameterRef};
 pub use port::{Port, PortRef};
+pub use procedure::{BuiltinFn, NativeFn};
 pub use value::{SchemeString, Value};

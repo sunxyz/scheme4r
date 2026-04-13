@@ -25,9 +25,9 @@
 - Support cmd and api , can embeddable
 **api**
 ```
-use scheme4r::{Environment, Scheme};
+use scheme4r::Scheme;
 
-let scheme = Scheme::new(Environment::standard());
+let scheme = Scheme::standard();
 let v = scheme.eval("(+ 1 2 3)")?;
 println!("{}",v);
 ```
@@ -41,6 +41,27 @@ shortcut
 use scheme4r::eval;
 
 let v = eval("(+ 1 2 3)")?;
+println!("{}", v);
+```
+
+host function
+```
+use std::collections::HashMap;
+
+use scheme4r::{BuiltinFn, Scheme, SchemeError, Value, eval::Engine};
+
+fn double(_: &Engine, args: &[Value]) -> Result<Value, SchemeError> {
+    match args {
+        [Value::Number(v)] => Ok(Value::Number(v * 2)),
+        _ => unreachable!(),
+    }
+}
+
+let mut builtins = HashMap::new();
+builtins.insert("double".to_string(), double as BuiltinFn);
+
+let scheme = Scheme::new(builtins);
+let v = scheme.eval("(double 21)")?;
 println!("{}", v);
 ```
 ### learn docs

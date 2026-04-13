@@ -1,22 +1,41 @@
+use std::collections::HashMap;
+
 use crate::{
     error::SchemeError,
     eval::Engine,
-    runtime::{EnvRef, Environment, Value},
+    runtime::{BuiltinFn, EnvRef, Environment, Value},
 };
+
+pub type BuiltinRegistry = HashMap<String, BuiltinFn>;
 
 pub struct Scheme {
     engine: Engine,
 }
 
 impl Scheme {
-    pub fn new(env: EnvRef) -> Self {
+    pub fn new(builtins: BuiltinRegistry) -> Self {
+        Self::with_env_and_builtins(Environment::standard(), builtins)
+    }
+
+    pub fn with_env(env: EnvRef) -> Self {
         Self {
             engine: Engine::new(env),
         }
     }
 
+    pub fn with_env_and_builtins(env: EnvRef, builtins: BuiltinRegistry) -> Self {
+        {
+            let mut env_ref = env.borrow_mut();
+            for (name, func) in builtins {
+                env_ref.define(name.clone(), Value::builtin(name, func));
+            }
+        }
+
+        Self::with_env(env)
+    }
+
     pub fn standard() -> Self {
-        Self::new(Environment::standard())
+        Self::new(HashMap::new())
     }
 
     pub fn eval(&self, source: &str) -> Result<Value, SchemeError> {
@@ -35,5 +54,5 @@ pub fn eval(source: &str) -> Result<Value, SchemeError> {
 }
 
 pub fn interpreter(source: &str, env: EnvRef) -> Result<Value, SchemeError> {
-    Scheme::new(env).eval(source)
+    Scheme::with_env(env).eval(source)
 }

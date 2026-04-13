@@ -22,11 +22,11 @@ pub struct LambdaClause {
 #[derive(Clone)]
 pub enum Procedure {
     Builtin {
-        name: &'static str,
+        name: String,
         func: BuiltinFn,
     },
     Native {
-        name: &'static str,
+        name: String,
         func: NativeFn,
     },
     Lambda {
@@ -44,12 +44,18 @@ pub enum Procedure {
 }
 
 impl Procedure {
-    pub fn builtin(name: &'static str, func: BuiltinFn) -> ProcedureRef {
-        Rc::new(Self::Builtin { name, func })
+    pub fn builtin(name: impl Into<String>, func: BuiltinFn) -> ProcedureRef {
+        Rc::new(Self::Builtin {
+            name: name.into(),
+            func,
+        })
     }
 
-    pub fn native(name: &'static str, func: NativeFn) -> ProcedureRef {
-        Rc::new(Self::Native { name, func })
+    pub fn native(name: impl Into<String>, func: NativeFn) -> ProcedureRef {
+        Rc::new(Self::Native {
+            name: name.into(),
+            func,
+        })
     }
 
     pub fn lambda(
@@ -78,8 +84,8 @@ impl Procedure {
 
     pub fn name(&self) -> Option<&str> {
         match self {
-            Self::Builtin { name, .. } => Some(name),
-            Self::Native { name, .. } => Some(name),
+            Self::Builtin { name, .. } => Some(name.as_str()),
+            Self::Native { name, .. } => Some(name.as_str()),
             Self::Lambda { name, .. } => name.as_deref(),
             Self::CaseLambda { name, .. } => name.as_deref(),
         }

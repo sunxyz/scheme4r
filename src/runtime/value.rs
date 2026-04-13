@@ -126,11 +126,11 @@ impl Value {
             .fold(tail, |cdr, car| Self::pair(car, cdr))
     }
 
-    pub fn builtin(name: &'static str, func: BuiltinFn) -> Self {
+    pub fn builtin(name: impl Into<String>, func: BuiltinFn) -> Self {
         Self::Procedure(Procedure::builtin(name, func))
     }
 
-    pub fn native(name: &'static str, func: NativeFn) -> Self {
+    pub fn native(name: impl Into<String>, func: NativeFn) -> Self {
         Self::Procedure(Procedure::native(name, func))
     }
 
