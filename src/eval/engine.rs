@@ -1,10 +1,17 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 use crate::{
     error::SchemeError,
     eval::syntax::SyntaxRules,
     reader::{Datum, Reader},
-    runtime::{procedure::Procedure, EnvRef, Environment, Library, Port, PortRef, Value},
+    runtime::{
+        procedure::Procedure, EnvRef, Environment, Library, Port, PortRef, RecordFieldSpec,
+        RecordInstance, RecordType, Value,
+    },
 };
 
 #[derive(Clone)]
@@ -123,6 +130,7 @@ impl Engine {
                 "quasiquote" => return self.eval_quasiquote(&items, env),
                 "if" => return self.eval_if(&items, env),
                 "define" => return self.eval_define(&items, env),
+                "define-record-type" => return self.eval_define_record_type(&items, env),
                 "define-syntax" => return self.eval_define_syntax(&items, env),
                 "import" => return self.eval_import(&items[1..], env),
                 "define-library" => return self.eval_define_library(&items, env),
@@ -232,6 +240,97 @@ impl Engine {
                 None,
             )),
         }
+    }
+
+    fn eval_define_record_type(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+        if items.len() < 4 {
+            return Err(SchemeError::arity(
+                "'define-record-type' expects a type name, constructor, predicate, and field specs",
+            ));
+        }
+
+        let Datum::Symbol(type_name) = items[1] else {
+            return Err(SchemeError::syntax(
+                "'define-record-type' type name must be a symbol",
+                None,
+            ));
+        };
+
+        let (constructor_name, constructor_fields) = parse_record_constructor_spec(items[2])?;
+
+        let Datum::Symbol(predicate_name) = items[3] else {
+            return Err(SchemeError::syntax(
+                "'define-record-type' predicate name must be a symbol",
+                None,
+            ));
+        };
+
+        let field_specs = parse_record_field_specs(&items[4..])?;
+
+        if constructor_fields.len() != field_specs.len() {
+            return Err(SchemeError::syntax(
+                "'define-record-type' constructor field list must match field spec count",
+                None,
+            ));
+        }
+
+        for (index, field_name) in constructor_fields.iter().enumerate() {
+            if field_specs[index].field_name != *field_name {
+                return Err(SchemeError::syntax(
+                    "'define-record-type' constructor field order must match field specs",
+                    None,
+                ));
+            }
+        }
+
+        let record_type = RecordType::new(
+            type_name.clone(),
+            field_specs
+                .iter()
+                .map(|spec| RecordFieldSpec::new(spec.field_name.clone(), spec.mutator.is_some()))
+                .collect(),
+        );
+
+        let mut env_mut = env.borrow_mut();
+
+        env_mut.define(
+            constructor_name.clone(),
+            Value::Procedure(Procedure::record_constructor(
+                constructor_name.clone(),
+                record_type.clone(),
+            )),
+        );
+        env_mut.define(
+            predicate_name.clone(),
+            Value::Procedure(Procedure::record_predicate(
+                predicate_name.clone(),
+                record_type.clone(),
+            )),
+        );
+
+        for (index, spec) in field_specs.iter().enumerate() {
+            env_mut.define(
+                spec.accessor.clone(),
+                Value::Procedure(Procedure::record_accessor(
+                    spec.accessor.clone(),
+                    record_type.clone(),
+                    index,
+                )),
+            );
+
+            if let Some(mutator) = &spec.mutator {
+                env_mut.define(
+                    mutator.clone(),
+                    Value::Procedure(Procedure::record_mutator(
+                        mutator.clone(),
+                        record_type.clone(),
+                        index,
+                    )),
+                );
+            }
+        }
+
+        Ok(Value::Unspecified)
     }
 
     fn eval_internal_define(&self, datum: &Datum, env: EnvRef) -> Result<(), SchemeError> {
@@ -779,6 +878,96 @@ impl Engine {
                         args,
                     )
                 }
+                Procedure::RecordConstructor { record_type, .. } => {
+                    if args.len() != record_type.field_count() {
+                        return Err(SchemeError::arity(format!(
+                            "record constructor expected {} arguments, got {}",
+                            record_type.field_count(),
+                            args.len()
+                        )));
+                    }
+                    Ok(Value::record(RecordInstance::new(
+                        record_type.clone(),
+                        args,
+                    )))
+                }
+                Procedure::RecordPredicate { record_type, .. } => {
+                    if args.len() != 1 {
+                        return Err(SchemeError::arity(
+                            "record predicate expects exactly 1 argument",
+                        ));
+                    }
+                    let is_match = match &args[0] {
+                        Value::Record(record) => {
+                            let instance_type = record.borrow().record_type();
+                            Rc::ptr_eq(&instance_type, record_type)
+                        }
+                        _ => false,
+                    };
+                    Ok(Value::Boolean(is_match))
+                }
+                Procedure::RecordAccessor {
+                    record_type,
+                    field_index,
+                    ..
+                } => {
+                    if args.len() != 1 {
+                        return Err(SchemeError::arity(
+                            "record accessor expects exactly 1 argument",
+                        ));
+                    }
+                    let Value::Record(record) = &args[0] else {
+                        return Err(SchemeError::type_error(
+                            "record accessor expected a record argument",
+                        ));
+                    };
+
+                    let instance = record.borrow();
+                    let instance_type = instance.record_type();
+                    if !Rc::ptr_eq(&instance_type, record_type) {
+                        return Err(SchemeError::type_error(
+                            "record accessor expected a matching record type",
+                        ));
+                    }
+
+                    instance
+                        .field(*field_index)
+                        .cloned()
+                        .ok_or_else(|| SchemeError::runtime("record accessor index out of range"))
+                }
+                Procedure::RecordMutator {
+                    record_type,
+                    field_index,
+                    ..
+                } => {
+                    if args.len() != 2 {
+                        return Err(SchemeError::arity(
+                            "record mutator expects exactly 2 arguments",
+                        ));
+                    }
+                    let Value::Record(record) = &args[0] else {
+                        return Err(SchemeError::type_error(
+                            "record mutator expected a record argument",
+                        ));
+                    };
+
+                    let mut instance = record.borrow_mut();
+                    let instance_type = instance.record_type();
+                    if !Rc::ptr_eq(&instance_type, record_type) {
+                        return Err(SchemeError::type_error(
+                            "record mutator expected a matching record type",
+                        ));
+                    }
+                    let Some(true) = record_type.field_mutable(*field_index) else {
+                        return Err(SchemeError::runtime(
+                            "record field is immutable and cannot be mutated",
+                        ));
+                    };
+                    if !instance.set_field(*field_index, args[1].clone()) {
+                        return Err(SchemeError::runtime("record mutator index out of range"));
+                    }
+                    Ok(Value::Unspecified)
+                }
             },
             Value::Parameter(parameter) => match args.as_slice() {
                 [] => Ok(parameter.cell().borrow().clone()),
@@ -1094,6 +1283,118 @@ fn collect_pair_as_list<'a>(car: &'a Datum, cdr: &'a Datum) -> Option<Vec<&'a Da
             _ => return None,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct RecordFieldDecl {
+    field_name: String,
+    accessor: String,
+    mutator: Option<String>,
+}
+
+fn parse_record_constructor_spec(datum: &Datum) -> Result<(String, Vec<String>), SchemeError> {
+    let items = datum.collect_proper_list().ok_or_else(|| {
+        SchemeError::syntax(
+            "'define-record-type' constructor spec must be a proper list",
+            None,
+        )
+    })?;
+
+    let Some(Datum::Symbol(constructor_name)) = items.first() else {
+        return Err(SchemeError::syntax(
+            "'define-record-type' constructor name must be a symbol",
+            None,
+        ));
+    };
+
+    let mut fields = Vec::new();
+    for field in &items[1..] {
+        let Datum::Symbol(field_name) = field else {
+            return Err(SchemeError::syntax(
+                "'define-record-type' constructor fields must be symbols",
+                None,
+            ));
+        };
+        fields.push(field_name.clone());
+    }
+
+    Ok((constructor_name.clone(), fields))
+}
+
+fn parse_record_field_specs(items: &[&Datum]) -> Result<Vec<RecordFieldDecl>, SchemeError> {
+    let mut fields = Vec::new();
+    let mut field_names = HashSet::new();
+    let mut proc_names = HashSet::new();
+
+    for item in items {
+        let parts = item.collect_proper_list().ok_or_else(|| {
+            SchemeError::syntax(
+                "'define-record-type' field spec must be a proper list",
+                None,
+            )
+        })?;
+
+        if parts.len() != 2 && parts.len() != 3 {
+            return Err(SchemeError::syntax(
+                "'define-record-type' field spec must be '(field accessor)' or '(field accessor mutator)'",
+                None,
+            ));
+        }
+
+        let Datum::Symbol(field_name) = parts[0] else {
+            return Err(SchemeError::syntax(
+                "'define-record-type' field name must be a symbol",
+                None,
+            ));
+        };
+        let Datum::Symbol(accessor) = parts[1] else {
+            return Err(SchemeError::syntax(
+                "'define-record-type' accessor name must be a symbol",
+                None,
+            ));
+        };
+
+        let mutator = if let Some(part) = parts.get(2) {
+            let Datum::Symbol(mutator) = part else {
+                return Err(SchemeError::syntax(
+                    "'define-record-type' mutator name must be a symbol",
+                    None,
+                ));
+            };
+            Some(mutator.clone())
+        } else {
+            None
+        };
+
+        if !field_names.insert(field_name.clone()) {
+            return Err(SchemeError::syntax(
+                "duplicate field name in 'define-record-type'",
+                None,
+            ));
+        }
+        if !proc_names.insert(accessor.clone()) {
+            return Err(SchemeError::syntax(
+                "duplicate accessor/mutator name in 'define-record-type'",
+                None,
+            ));
+        }
+        if let Some(mutator) = &mutator {
+            if !proc_names.insert(mutator.clone()) {
+                return Err(SchemeError::syntax(
+                    "duplicate accessor/mutator name in 'define-record-type'",
+                    None,
+                ));
+            }
+        }
+
+        fields.push(RecordFieldDecl {
+            field_name: field_name.clone(),
+            accessor: accessor.clone(),
+            mutator,
+        });
+    }
+
+    Ok(fields)
 }
 
 fn parse_bindings(datum: &Datum) -> Result<Vec<(String, &Datum)>, SchemeError> {

@@ -4,7 +4,7 @@ use crate::{
     error::SchemeError,
     eval::Engine,
     reader::Datum,
-    runtime::{environment::EnvRef, value::Value},
+    runtime::{environment::EnvRef, record::RecordTypeRef, value::Value},
 };
 
 pub type BuiltinFn = fn(&Engine, &[Value]) -> Result<Value, SchemeError>;
@@ -40,6 +40,24 @@ pub enum Procedure {
         name: Option<String>,
         clauses: Vec<LambdaClause>,
         env: EnvRef,
+    },
+    RecordConstructor {
+        name: String,
+        record_type: RecordTypeRef,
+    },
+    RecordPredicate {
+        name: String,
+        record_type: RecordTypeRef,
+    },
+    RecordAccessor {
+        name: String,
+        record_type: RecordTypeRef,
+        field_index: usize,
+    },
+    RecordMutator {
+        name: String,
+        record_type: RecordTypeRef,
+        field_index: usize,
     },
 }
 
@@ -82,12 +100,54 @@ impl Procedure {
         Rc::new(Self::CaseLambda { name, clauses, env })
     }
 
+    pub fn record_constructor(name: impl Into<String>, record_type: RecordTypeRef) -> ProcedureRef {
+        Rc::new(Self::RecordConstructor {
+            name: name.into(),
+            record_type,
+        })
+    }
+
+    pub fn record_predicate(name: impl Into<String>, record_type: RecordTypeRef) -> ProcedureRef {
+        Rc::new(Self::RecordPredicate {
+            name: name.into(),
+            record_type,
+        })
+    }
+
+    pub fn record_accessor(
+        name: impl Into<String>,
+        record_type: RecordTypeRef,
+        field_index: usize,
+    ) -> ProcedureRef {
+        Rc::new(Self::RecordAccessor {
+            name: name.into(),
+            record_type,
+            field_index,
+        })
+    }
+
+    pub fn record_mutator(
+        name: impl Into<String>,
+        record_type: RecordTypeRef,
+        field_index: usize,
+    ) -> ProcedureRef {
+        Rc::new(Self::RecordMutator {
+            name: name.into(),
+            record_type,
+            field_index,
+        })
+    }
+
     pub fn name(&self) -> Option<&str> {
         match self {
             Self::Builtin { name, .. } => Some(name.as_str()),
             Self::Native { name, .. } => Some(name.as_str()),
             Self::Lambda { name, .. } => name.as_deref(),
             Self::CaseLambda { name, .. } => name.as_deref(),
+            Self::RecordConstructor { name, .. } => Some(name.as_str()),
+            Self::RecordPredicate { name, .. } => Some(name.as_str()),
+            Self::RecordAccessor { name, .. } => Some(name.as_str()),
+            Self::RecordMutator { name, .. } => Some(name.as_str()),
         }
     }
 }
@@ -109,6 +169,26 @@ impl fmt::Debug for Procedure {
                 .debug_struct("CaseLambda")
                 .field("name", name)
                 .field("clauses", clauses)
+                .finish(),
+            Self::RecordConstructor { name, .. } => {
+                f.debug_tuple("RecordConstructor").field(name).finish()
+            }
+            Self::RecordPredicate { name, .. } => {
+                f.debug_tuple("RecordPredicate").field(name).finish()
+            }
+            Self::RecordAccessor {
+                name, field_index, ..
+            } => f
+                .debug_struct("RecordAccessor")
+                .field("name", name)
+                .field("field_index", field_index)
+                .finish(),
+            Self::RecordMutator {
+                name, field_index, ..
+            } => f
+                .debug_struct("RecordMutator")
+                .field("name", name)
+                .field("field_index", field_index)
                 .finish(),
         }
     }

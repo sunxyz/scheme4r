@@ -7,12 +7,14 @@ use std::{
 use crate::{
     reader::{datum::fmt_character, Datum},
     runtime::{
+        dict::{DictMap, DictRef},
         environment::EnvRef,
         error_object::ErrorObjectRef,
         pair::{PairCell, PairRef},
         parameter::ParameterRef,
         port::PortRef,
         procedure::{BuiltinFn, LambdaClause, NativeFn, Procedure, ProcedureRef},
+        record::RecordRef,
     },
 };
 
@@ -71,6 +73,8 @@ pub enum Value {
     Pair(PairRef),
     Vector(VectorRef),
     ByteVector(ByteVectorRef),
+    Dict(DictRef),
+    Record(RecordRef),
     Port(PortRef),
     ErrorObject(ErrorObjectRef),
     Parameter(ParameterRef),
@@ -101,6 +105,14 @@ impl Value {
 
     pub fn bytevector(items: Vec<u8>) -> Self {
         Self::ByteVector(Rc::new(RefCell::new(items)))
+    }
+
+    pub fn dict(items: DictMap) -> Self {
+        Self::Dict(Rc::new(RefCell::new(items)))
+    }
+
+    pub fn record(record: RecordRef) -> Self {
+        Self::Record(record)
     }
 
     pub fn port(port: PortRef) -> Self {
@@ -190,6 +202,12 @@ impl Value {
                 let pair = pair.borrow();
                 Ok(Datum::pair(pair.car.to_datum()?, pair.cdr.to_datum()?))
             }
+            Self::Dict(_) => Err(crate::error::SchemeError::type_error(
+                "cannot convert a dict to datum",
+            )),
+            Self::Record(_) => Err(crate::error::SchemeError::type_error(
+                "cannot convert a record to datum",
+            )),
             Self::Procedure(_) => Err(crate::error::SchemeError::type_error(
                 "cannot convert a procedure to datum",
             )),
@@ -267,6 +285,8 @@ impl Value {
             (Self::Pair(left), Self::Pair(right)) => Rc::ptr_eq(left, right),
             (Self::Vector(left), Self::Vector(right)) => Rc::ptr_eq(left, right),
             (Self::ByteVector(left), Self::ByteVector(right)) => Rc::ptr_eq(left, right),
+            (Self::Dict(left), Self::Dict(right)) => Rc::ptr_eq(left, right),
+            (Self::Record(left), Self::Record(right)) => Rc::ptr_eq(left, right),
             (Self::Port(left), Self::Port(right)) => Rc::ptr_eq(left, right),
             (Self::ErrorObject(left), Self::ErrorObject(right)) => Rc::ptr_eq(left, right),
             (Self::Parameter(left), Self::Parameter(right)) => Rc::ptr_eq(left, right),
@@ -293,6 +313,31 @@ impl Value {
                         .all(|(left, right)| Self::equal(left, right))
             }
             (Self::ByteVector(left), Self::ByteVector(right)) => *left.borrow() == *right.borrow(),
+            (Self::Dict(left), Self::Dict(right)) => {
+                let left = left.borrow();
+                let right = right.borrow();
+                left.len() == right.len()
+                    && left.iter().all(|(key, left_value)| {
+                        let Some(right_value) = right.get(key) else {
+                            return false;
+                        };
+                        Self::equal(left_value, right_value)
+                    })
+            }
+            (Self::Record(left), Self::Record(right)) => {
+                let left = left.borrow();
+                let right = right.borrow();
+                Rc::ptr_eq(&left.record_type(), &right.record_type())
+                    && (0..left.record_type().field_count()).all(|index| {
+                        let Some(left_field) = left.field(index) else {
+                            return false;
+                        };
+                        let Some(right_field) = right.field(index) else {
+                            return false;
+                        };
+                        Self::equal(left_field, right_field)
+                    })
+            }
             (Self::Multiple(left), Self::Multiple(right)) => {
                 left.len() == right.len()
                     && left
@@ -322,6 +367,14 @@ impl fmt::Display for Value {
                 write!(f, "#u8(")?;
                 fmt_bytevector(&values.borrow(), f)?;
                 write!(f, ")")
+            }
+            Self::Dict(values) => write!(f, "#<dict:{}>", values.borrow().len()),
+            Self::Record(record) => {
+                let name = {
+                    let borrowed = record.borrow();
+                    borrowed.record_type().name().to_string()
+                };
+                write!(f, "#<record:{name}>")
             }
             Self::Port(port) => write!(f, "#<{}>", port.borrow().display_name()),
             Self::ErrorObject(error) => write!(f, "#<error-object:{}>", error.message()),

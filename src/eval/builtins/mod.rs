@@ -3,13 +3,14 @@ use std::{cell::RefCell, convert::TryFrom, rc::Rc};
 use crate::{
     error::SchemeError,
     eval::Engine,
-    runtime::{environment::Environment, pair::PairCell, PortRef, SchemeString, Value},
+    runtime::{environment::Environment, pair::PairCell, DictRef, PortRef, SchemeString, Value},
 };
 
 mod booleans;
 mod bytevectors;
 mod chars;
 mod control;
+mod dicts;
 mod equivalence;
 mod lists;
 mod numbers;
@@ -29,6 +30,7 @@ pub(crate) fn install(env: &mut Environment) {
     vectors::install(env);
     bytevectors::install(env);
     equivalence::install(env);
+    dicts::install(env);
     procedures::install(env);
     control::install(env);
     ports::install(env);
@@ -171,6 +173,15 @@ pub(super) fn expect_pair(name: &str, value: &Value) -> Result<Rc<RefCell<PairCe
         Value::Pair(pair) => Ok(pair.clone()),
         other => Err(SchemeError::type_error(format!(
             "'{name}' expected a pair, got {other}"
+        ))),
+    }
+}
+
+pub(super) fn expect_dict(name: &str, value: &Value) -> Result<DictRef, SchemeError> {
+    match value {
+        Value::Dict(dict) => Ok(dict.clone()),
+        other => Err(SchemeError::type_error(format!(
+            "'{name}' expected a dict, got {other}"
         ))),
     }
 }

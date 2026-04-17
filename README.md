@@ -14,6 +14,7 @@
 - Strings 
 - Vectors 
 - Bytevectors
+- Dicts
 - Procedures
 - Records 
 - Ports
