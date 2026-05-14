@@ -11,6 +11,7 @@ pub(super) fn install(env: &mut Environment) {
     define_builtin(env, "char-ready?", char_ready);
     define_builtin(env, "read-string", read_string);
     define_builtin(env, "eval", eval_builtin);
+    define_builtin(env, "environment", environment);
     define_builtin(env, "load", load);
     define_builtin(env, "eof-object?", eof_object_predicate);
     define_builtin(env, "port?", port_predicate);
@@ -152,8 +153,18 @@ fn eof_object_predicate(_: &Engine, args: &[Value]) -> Result<Value, SchemeError
 }
 
 fn eval_builtin(engine: &Engine, args: &[Value]) -> Result<Value, SchemeError> {
-    expect_arity("eval", args, 1)?;
-    let env = engine.current_env();
+    if args.is_empty() || args.len() > 2 {
+        return Err(SchemeError::arity("'eval' expects 1 or 2 arguments"));
+    }
+    let env = match args.get(1) {
+        Some(Value::Environment(env)) => env.clone(),
+        Some(other) => {
+            return Err(SchemeError::type_error(format!(
+                "'eval' expected an environment specifier, got {other}"
+            )))
+        }
+        None => engine.current_env(),
+    };
     match &args[0] {
         Value::String(source) => engine.run_in_env(&source.to_plain_string(), env),
         value => {
@@ -161,6 +172,12 @@ fn eval_builtin(engine: &Engine, args: &[Value]) -> Result<Value, SchemeError> {
             engine.eval_datum(&datum, env)
         }
     }
+}
+
+fn environment(engine: &Engine, args: &[Value]) -> Result<Value, SchemeError> {
+    Ok(Value::Environment(
+        engine.build_environment_from_import_sets(args)?,
+    ))
 }
 
 fn load(engine: &Engine, args: &[Value]) -> Result<Value, SchemeError> {

@@ -9,8 +9,9 @@ use crate::{
     eval::syntax::SyntaxRules,
     reader::{Datum, Reader},
     runtime::{
-        procedure::Procedure, EnvRef, Environment, Library, Port, PortRef, RecordFieldSpec,
-        RecordInstance, RecordType, Value,
+        procedure::{LambdaClause, Procedure},
+        EnvRef, Environment, Library, Port, PortRef, RecordFieldSpec, RecordInstance, RecordType,
+        Value,
     },
 };
 
@@ -127,6 +128,39 @@ impl Engine {
 
     pub(crate) fn current_error_port(&self) -> PortRef {
         self.port_state.borrow().current_error.clone()
+    }
+
+    pub(crate) fn build_environment_from_import_sets(
+        &self,
+        args: &[Value],
+    ) -> Result<EnvRef, SchemeError> {
+        if args.is_empty() {
+            return Err(SchemeError::arity(
+                "'environment' expects at least 1 import set",
+            ));
+        }
+
+        let env = Environment::isolated_with_registry(self.root_env.clone());
+        let mut imported = HashMap::new();
+        for arg in args {
+            let datum = arg.to_datum()?;
+            imported.extend(resolve_import_set(&datum, env.clone())?);
+        }
+        env.borrow_mut().import_bindings(&imported);
+        Ok(env)
+    }
+
+    pub(crate) fn expect_environment_specifier(
+        &self,
+        value: &Value,
+        name: &str,
+    ) -> Result<EnvRef, SchemeError> {
+        match value {
+            Value::Environment(env) => Ok(env.clone()),
+            other => Err(SchemeError::type_error(format!(
+                "'{name}' expected an environment specifier, got {other}"
+            ))),
+        }
     }
 
     pub(crate) fn require_single_value(
@@ -343,11 +377,13 @@ impl Engine {
                 "quasiquote" => return self.eval_quasiquote(&items, env),
                 "if" => return self.eval_if(&items, env),
                 "define" => return self.eval_define(&items, env),
+                "define-values" => return self.eval_define_values(&items, env),
                 "define-record-type" => return self.eval_define_record_type(&items, env),
                 "define-syntax" => return self.eval_define_syntax(&items, env),
                 "import" => return self.eval_import(&items[1..], env),
                 "define-library" => return self.eval_define_library(&items, env),
                 "lambda" => return self.eval_lambda(&items, env, None),
+                "case-lambda" => return self.eval_case_lambda(&items, env, None),
                 "begin" => return self.eval_begin(&items[1..], env),
                 "set!" => return self.eval_set(&items, env),
                 "and" => return self.eval_and(&items[1..], env),
@@ -355,6 +391,8 @@ impl Engine {
                 "let" => return self.eval_let(&items, env),
                 "let*" => return self.eval_let_star(&items, env),
                 "letrec" => return self.eval_letrec(&items, env),
+                "let-values" => return self.eval_let_values(&items, env),
+                "let*-values" => return self.eval_let_star_values(&items, env),
                 "let-syntax" => return self.eval_let_syntax(&items, env),
                 "letrec-syntax" => return self.eval_letrec_syntax(&items, env),
                 "cond" => return self.eval_cond(&items[1..], env),
@@ -453,6 +491,29 @@ impl Engine {
                 None,
             )),
         }
+    }
+
+    fn eval_define_values(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
+        if items.len() != 3 {
+            return Err(SchemeError::arity(
+                "'define-values' expects a formals list and exactly 1 value expression",
+            ));
+        }
+
+        let (params, rest) = extract_formals(items[1])?;
+        let values = unpack_values(self.eval(items[2], env.clone())?);
+        {
+            let mut env_mut = env.borrow_mut();
+            bind_formals_values(
+                &mut env_mut,
+                &params,
+                &rest,
+                values,
+                "define-values",
+                BindingMode::Define,
+            )?;
+        }
+        Ok(EvalStep::Done(Value::Unspecified))
     }
 
     fn eval_define_record_type(
@@ -555,40 +616,62 @@ impl Engine {
             .collect_proper_list()
             .ok_or_else(|| SchemeError::syntax("'define' form must be proper", None))?;
 
-        match items[1] {
-            Datum::Symbol(name) => {
+        match items.first().and_then(|item| item.as_symbol()) {
+            Some("define") => match items[1] {
+                Datum::Symbol(name) => {
+                    if items.len() != 3 {
+                        return Err(SchemeError::syntax(
+                            "variable define must contain exactly one value expression",
+                            None,
+                        ));
+                    }
+                    let value = self.eval_single(items[2], env.clone(), "'define' value")?;
+                    env.borrow_mut().set(name, value)?;
+                    Ok(())
+                }
+                Datum::Pair(_, _) => {
+                    let signature = items[1].collect_proper_list().ok_or_else(|| {
+                        SchemeError::syntax("function signature must be a proper list", None)
+                    })?;
+
+                    let Some(Datum::Symbol(name)) = signature.first() else {
+                        return Err(SchemeError::syntax("function name must be a symbol", None));
+                    };
+
+                    let params = extract_parameters(&signature[1..])?;
+                    let body = items[2..]
+                        .iter()
+                        .map(|datum| (*datum).clone())
+                        .collect::<Vec<_>>();
+                    let proc = Value::lambda(Some(name.clone()), params, None, body, env.clone());
+                    env.borrow_mut().set(name, proc)?;
+                    Ok(())
+                }
+                _ => Err(SchemeError::syntax(
+                    "define expects a symbol or function signature",
+                    None,
+                )),
+            },
+            Some("define-values") => {
                 if items.len() != 3 {
-                    return Err(SchemeError::syntax(
-                        "variable define must contain exactly one value expression",
-                        None,
+                    return Err(SchemeError::arity(
+                        "'define-values' expects a formals list and exactly 1 value expression",
                     ));
                 }
-                let value = self.eval_single(items[2], env.clone(), "'define' value")?;
-                env.borrow_mut().set(name, value)?;
-                Ok(())
-            }
-            Datum::Pair(_, _) => {
-                let signature = items[1].collect_proper_list().ok_or_else(|| {
-                    SchemeError::syntax("function signature must be a proper list", None)
-                })?;
 
-                let Some(Datum::Symbol(name)) = signature.first() else {
-                    return Err(SchemeError::syntax("function name must be a symbol", None));
-                };
-
-                let params = extract_parameters(&signature[1..])?;
-                let body = items[2..]
-                    .iter()
-                    .map(|datum| (*datum).clone())
-                    .collect::<Vec<_>>();
-                let proc = Value::lambda(Some(name.clone()), params, None, body, env.clone());
-                env.borrow_mut().set(name, proc)?;
-                Ok(())
+                let (params, rest) = extract_formals(items[1])?;
+                let values = unpack_values(self.eval(items[2], env.clone())?);
+                let mut env_mut = env.borrow_mut();
+                bind_formals_values(
+                    &mut env_mut,
+                    &params,
+                    &rest,
+                    values,
+                    "define-values",
+                    BindingMode::Set,
+                )
             }
-            _ => Err(SchemeError::syntax(
-                "define expects a symbol or function signature",
-                None,
-            )),
+            _ => Err(SchemeError::syntax("unsupported definition form", None)),
         }
     }
 
@@ -609,6 +692,40 @@ impl Engine {
             .map(|datum| (*datum).clone())
             .collect::<Vec<_>>();
         Ok(EvalStep::Done(Value::lambda(name, params, rest, body, env)))
+    }
+
+    fn eval_case_lambda(
+        &self,
+        items: &[&Datum],
+        env: EnvRef,
+        name: Option<String>,
+    ) -> Result<EvalStep, SchemeError> {
+        if items.len() < 2 {
+            return Err(SchemeError::arity(
+                "'case-lambda' expects at least 1 clause",
+            ));
+        }
+
+        let mut clauses = Vec::new();
+        for clause in &items[1..] {
+            let parts = clause.collect_proper_list().ok_or_else(|| {
+                SchemeError::syntax("'case-lambda' clauses must be proper lists", None)
+            })?;
+            if parts.len() < 2 {
+                return Err(SchemeError::syntax(
+                    "'case-lambda' clauses must contain formals and at least 1 body expression",
+                    None,
+                ));
+            }
+            let (params, rest) = extract_formals(parts[0])?;
+            let body = parts[1..]
+                .iter()
+                .map(|datum| (*datum).clone())
+                .collect::<Vec<_>>();
+            clauses.push(LambdaClause { params, rest, body });
+        }
+
+        Ok(EvalStep::Done(Value::case_lambda(name, clauses, env)))
     }
 
     fn eval_define_syntax(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
@@ -754,7 +871,9 @@ impl Engine {
         {
             let mut body_env_mut = body_env.borrow_mut();
             for define in &items[..define_count] {
-                body_env_mut.define(extract_define_name(define)?, Value::Unspecified);
+                for name in extract_definition_names(define)? {
+                    body_env_mut.define(name, Value::Unspecified);
+                }
             }
         }
 
@@ -867,6 +986,65 @@ impl Engine {
             let value = self.eval_single(init, let_env.clone(), "'letrec' binding init")?;
             let_env.borrow_mut().set(&name, value)?;
         }
+        self.eval_body(&items[2..], let_env)
+    }
+
+    fn eval_let_values(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
+        if items.len() < 3 {
+            return Err(SchemeError::arity(
+                "'let-values' expects bindings and at least 1 body expression",
+            ));
+        }
+
+        let bindings = parse_value_bindings(items[1])?;
+        let let_env = Environment::child(env.clone());
+        let mut resolved = Vec::with_capacity(bindings.len());
+        for (formals, init) in bindings {
+            let (params, rest) = extract_formals(formals)?;
+            let values = unpack_values(self.eval(init, env.clone())?);
+            resolved.push((params, rest, values));
+        }
+
+        {
+            let mut let_env_mut = let_env.borrow_mut();
+            for (params, rest, values) in resolved {
+                bind_formals_values(
+                    &mut let_env_mut,
+                    &params,
+                    &rest,
+                    values,
+                    "let-values",
+                    BindingMode::Define,
+                )?;
+            }
+        }
+
+        self.eval_body(&items[2..], let_env)
+    }
+
+    fn eval_let_star_values(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
+        if items.len() < 3 {
+            return Err(SchemeError::arity(
+                "'let*-values' expects bindings and at least 1 body expression",
+            ));
+        }
+
+        let bindings = parse_value_bindings(items[1])?;
+        let let_env = Environment::child(env);
+        for (formals, init) in bindings {
+            let (params, rest) = extract_formals(formals)?;
+            let values = unpack_values(self.eval(init, let_env.clone())?);
+            let mut let_env_mut = let_env.borrow_mut();
+            bind_formals_values(
+                &mut let_env_mut,
+                &params,
+                &rest,
+                values,
+                "let*-values",
+                BindingMode::Define,
+            )?;
+        }
+
         self.eval_body(&items[2..], let_env)
     }
 
@@ -1340,19 +1518,26 @@ impl Engine {
     }
 
     fn apply_eval_builtin(&self, env: EnvRef, args: Vec<Value>) -> Result<EvalStep, SchemeError> {
-        if args.len() != 1 {
+        if args.is_empty() || args.len() > 2 {
             return Err(SchemeError::arity(format!(
-                "'eval' expects {} arguments, got {}",
-                1,
+                "'eval' expects 1 or 2 arguments, got {}",
                 args.len()
             )));
         }
 
+        let target_env = match args.get(1) {
+            Some(value) => self.expect_environment_specifier(value, "eval")?,
+            None => env,
+        };
+
         match &args[0] {
             Value::String(source) => {
-                self.eval_forms_as_step(Reader::new(&source.to_plain_string()).read_all()?, env)
+                self.eval_forms_as_step(
+                    Reader::new(&source.to_plain_string()).read_all()?,
+                    target_env,
+                )
             }
-            value => Ok(EvalStep::Eval(value.to_datum()?, env)),
+            value => Ok(EvalStep::Eval(value.to_datum()?, target_env)),
         }
     }
 
@@ -1476,31 +1661,17 @@ impl Engine {
         env: EnvRef,
         args: Vec<Value>,
     ) -> Result<EvalStep, SchemeError> {
-        if rest.is_none() && params.len() != args.len() {
-            return Err(SchemeError::arity(format!(
-                "lambda expected {} arguments, got {}",
-                params.len(),
-                args.len()
-            )));
-        }
-        if rest.is_some() && args.len() < params.len() {
-            return Err(SchemeError::arity(format!(
-                "lambda expected at least {} arguments, got {}",
-                params.len(),
-                args.len()
-            )));
-        }
-
         let call_env = Environment::child(env);
         {
             let mut call_env_mut = call_env.borrow_mut();
-            for (name, value) in params.iter().zip(args.iter().cloned()) {
-                call_env_mut.define(name.clone(), value);
-            }
-            if let Some(rest_name) = rest {
-                let rest_values = args[params.len()..].to_vec();
-                call_env_mut.define(rest_name.clone(), Value::list(rest_values));
-            }
+            bind_formals_values(
+                &mut call_env_mut,
+                params,
+                rest,
+                args,
+                "lambda",
+                BindingMode::Define,
+            )?;
         }
 
         let body_refs = body.iter().collect::<Vec<_>>();
@@ -1513,13 +1684,14 @@ fn datum_to_value(datum: &Datum) -> Value {
 }
 
 fn is_definition_form(datum: &Datum) -> bool {
-    datum
-        .collect_proper_list()
-        .and_then(|items| items.first().and_then(|item| item.as_symbol()))
-        == Some("define")
+    matches!(
+        datum.collect_proper_list()
+            .and_then(|items| items.first().and_then(|item| item.as_symbol())),
+        Some("define" | "define-values")
+    )
 }
 
-fn extract_define_name(datum: &Datum) -> Result<String, SchemeError> {
+fn extract_definition_names(datum: &Datum) -> Result<Vec<String>, SchemeError> {
     let items = datum
         .collect_proper_list()
         .ok_or_else(|| SchemeError::syntax("'define' form must be proper", None))?;
@@ -1529,19 +1701,38 @@ fn extract_define_name(datum: &Datum) -> Result<String, SchemeError> {
         ));
     }
 
-    match items[1] {
-        Datum::Symbol(name) => Ok(name.clone()),
-        Datum::Pair(_, _) => {
-            let signature = items[1].collect_proper_list().ok_or_else(|| {
-                SchemeError::syntax("function signature must be a proper list", None)
-            })?;
-            let Some(Datum::Symbol(name)) = signature.first() else {
-                return Err(SchemeError::syntax("function name must be a symbol", None));
-            };
-            Ok(name.clone())
+    match items.first().and_then(|item| item.as_symbol()) {
+        Some("define") => match items[1] {
+            Datum::Symbol(name) => Ok(vec![name.clone()]),
+            Datum::Pair(_, _) => {
+                let signature = items[1].collect_proper_list().ok_or_else(|| {
+                    SchemeError::syntax("function signature must be a proper list", None)
+                })?;
+                let Some(Datum::Symbol(name)) = signature.first() else {
+                    return Err(SchemeError::syntax("function name must be a symbol", None));
+                };
+                Ok(vec![name.clone()])
+            }
+            _ => Err(SchemeError::syntax(
+                "define expects a symbol or function signature",
+                None,
+            )),
+        },
+        Some("define-values") => {
+            if items.len() != 3 {
+                return Err(SchemeError::arity(
+                    "'define-values' expects a formals list and exactly 1 value expression",
+                ));
+            }
+            let (params, rest) = extract_formals(items[1])?;
+            let mut names = params;
+            if let Some(rest_name) = rest {
+                names.push(rest_name);
+            }
+            Ok(names)
         }
         _ => Err(SchemeError::syntax(
-            "define expects a symbol or function signature",
+            "unsupported definition form",
             None,
         )),
     }
@@ -1826,6 +2017,84 @@ fn parse_do_bindings(datum: &Datum) -> Result<Vec<(String, &Datum, Option<&Datum
     }
 
     Ok(bindings)
+}
+
+fn parse_value_bindings(datum: &Datum) -> Result<Vec<(&Datum, &Datum)>, SchemeError> {
+    let binding_datums = datum
+        .collect_proper_list()
+        .ok_or_else(|| SchemeError::syntax("value binding list must be proper", None))?;
+    let mut bindings = Vec::new();
+
+    for binding in binding_datums {
+        let parts = binding
+            .collect_proper_list()
+            .ok_or_else(|| SchemeError::syntax("value binding must be a proper list", None))?;
+
+        if parts.len() != 2 {
+            return Err(SchemeError::syntax(
+                "each value binding must contain exactly formals and an init expression",
+                None,
+            ));
+        }
+
+        bindings.push((parts[0], parts[1]));
+    }
+
+    Ok(bindings)
+}
+
+#[derive(Clone, Copy)]
+enum BindingMode {
+    Define,
+    Set,
+}
+
+fn unpack_values(value: Value) -> Vec<Value> {
+    match value {
+        Value::Multiple(values) => values,
+        value => vec![value],
+    }
+}
+
+fn bind_formals_values(
+    env: &mut Environment,
+    params: &[String],
+    rest: &Option<String>,
+    values: Vec<Value>,
+    context: &str,
+    mode: BindingMode,
+) -> Result<(), SchemeError> {
+    if rest.is_none() && params.len() != values.len() {
+        return Err(SchemeError::arity(format!(
+            "'{context}' expected {} values, got {}",
+            params.len(),
+            values.len()
+        )));
+    }
+    if rest.is_some() && values.len() < params.len() {
+        return Err(SchemeError::arity(format!(
+            "'{context}' expected at least {} values, got {}",
+            params.len(),
+            values.len()
+        )));
+    }
+
+    for (name, value) in params.iter().zip(values.iter().cloned()) {
+        match mode {
+            BindingMode::Define => env.define(name.clone(), value),
+            BindingMode::Set => env.set(name, value)?,
+        }
+    }
+
+    if let Some(rest_name) = rest {
+        let rest_value = Value::list(values[params.len()..].to_vec());
+        match mode {
+            BindingMode::Define => env.define(rest_name.clone(), rest_value),
+            BindingMode::Set => env.set(rest_name, rest_value)?,
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_library_name(datum: &Datum) -> Result<String, SchemeError> {

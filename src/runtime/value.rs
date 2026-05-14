@@ -78,6 +78,7 @@ pub enum Value {
     Port(PortRef),
     ErrorObject(ErrorObjectRef),
     Parameter(ParameterRef),
+    Environment(EnvRef),
     Continuation(usize),
     EmptyList,
     Procedure(ProcedureRef),
@@ -217,6 +218,9 @@ impl Value {
             Self::Parameter(_) => Err(crate::error::SchemeError::type_error(
                 "cannot convert a parameter object to datum",
             )),
+            Self::Environment(_) => Err(crate::error::SchemeError::type_error(
+                "cannot convert an environment specifier to datum",
+            )),
             Self::Multiple(_) => Err(crate::error::SchemeError::type_error(
                 "cannot convert multiple values to datum",
             )),
@@ -290,6 +294,7 @@ impl Value {
             (Self::Port(left), Self::Port(right)) => Rc::ptr_eq(left, right),
             (Self::ErrorObject(left), Self::ErrorObject(right)) => Rc::ptr_eq(left, right),
             (Self::Parameter(left), Self::Parameter(right)) => Rc::ptr_eq(left, right),
+            (Self::Environment(left), Self::Environment(right)) => Rc::ptr_eq(left, right),
             (Self::Continuation(left), Self::Continuation(right)) => left == right,
             (Self::Procedure(left), Self::Procedure(right)) => Rc::ptr_eq(left, right),
             _ => false,
@@ -379,6 +384,7 @@ impl fmt::Display for Value {
             Self::Port(port) => write!(f, "#<{}>", port.borrow().display_name()),
             Self::ErrorObject(error) => write!(f, "#<error-object:{}>", error.message()),
             Self::Parameter(_) => write!(f, "#<parameter>"),
+            Self::Environment(_) => write!(f, "#<environment>"),
             Self::Continuation(_) => write!(f, "#<continuation>"),
             Self::EmptyList => write!(f, "()"),
             Self::Procedure(proc) => match proc.name() {
