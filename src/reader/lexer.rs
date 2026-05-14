@@ -6,21 +6,32 @@ use crate::{
     },
 };
 
+enum ParsedNumber {
+    Integer(i64),
+    Float(f64),
+}
+
 pub struct Lexer<'a> {
     chars: Vec<char>,
     index: usize,
     line: usize,
     column: usize,
+    fold_case: bool,
     _source: &'a str,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(source: &'a str) -> Self {
+        Self::with_fold_case(source, false)
+    }
+
+    pub fn with_fold_case(source: &'a str, fold_case: bool) -> Self {
         Self {
             chars: source.chars().collect(),
             index: 0,
             line: 1,
             column: 1,
+            fold_case,
             _source: source,
         }
     }
@@ -138,7 +149,7 @@ impl<'a> Lexer<'a> {
     fn read_dispatch(&mut self, span: Span, start: usize) -> Result<Token, SchemeError> {
         self.advance();
 
-        match self.peek() {
+        match self.peek().map(|ch| ch.to_ascii_lowercase()) {
             Some('t') => {
                 self.advance();
                 Ok(Token::new(
@@ -161,7 +172,10 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 Ok(Token::new(TokenKind::VectorStart, span, start, self.index))
             }
-            Some('u') if self.peek_n(1) == Some('8') && self.peek_n(2) == Some('(') => {
+            Some('u')
+                if self.peek_n(1).map(|ch| ch.to_ascii_lowercase()) == Some('8')
+                    && self.peek_n(2) == Some('(') =>
+            {
                 self.advance();
                 self.advance();
                 self.advance();
@@ -190,27 +204,27 @@ impl<'a> Lexer<'a> {
                 Some('#') => {
                     self.advance();
                 }
-                Some('b') if !saw_radix => {
+                Some(ch) if ch.eq_ignore_ascii_case(&'b') && !saw_radix => {
                     self.advance();
                     radix = 2;
                     saw_radix = true;
                 }
-                Some('o') if !saw_radix => {
+                Some(ch) if ch.eq_ignore_ascii_case(&'o') && !saw_radix => {
                     self.advance();
                     radix = 8;
                     saw_radix = true;
                 }
-                Some('d') if !saw_radix => {
+                Some(ch) if ch.eq_ignore_ascii_case(&'d') && !saw_radix => {
                     self.advance();
                     radix = 10;
                     saw_radix = true;
                 }
-                Some('x') if !saw_radix => {
+                Some(ch) if ch.eq_ignore_ascii_case(&'x') && !saw_radix => {
                     self.advance();
                     radix = 16;
                     saw_radix = true;
                 }
-                Some('e' | 'i') if !saw_exactness => {
+                Some(ch) if matches!(ch.to_ascii_lowercase(), 'e' | 'i') && !saw_exactness => {
                     self.advance();
                     saw_exactness = true;
                 }
@@ -269,7 +283,8 @@ impl<'a> Lexer<'a> {
             self.advance();
         }
 
-        let value = match text.as_str() {
+        let folded = text.to_ascii_lowercase();
+        let value = match folded.as_str() {
             "space" => ' ',
             "newline" => '\n',
             "" => {
@@ -312,9 +327,16 @@ impl<'a> Lexer<'a> {
             self.advance();
         }
 
-        let kind = match text.parse::<i64>() {
-            Ok(number) => TokenKind::Number(number),
-            Err(_) => TokenKind::Symbol(text),
+        let symbol_text = if self.fold_case {
+            text.to_ascii_lowercase()
+        } else {
+            text.clone()
+        };
+
+        let kind = match parse_number_literal(&text) {
+            Some(ParsedNumber::Integer(number)) => TokenKind::Number(number),
+            Some(ParsedNumber::Float(number)) => TokenKind::Float(number),
+            None => TokenKind::Symbol(symbol_text),
         };
 
         Token::new(kind, span, start, self.index)
@@ -519,4 +541,21 @@ impl<'a> Lexer<'a> {
 
 fn is_delimiter(ch: char) -> bool {
     ch.is_whitespace() || matches!(ch, '(' | ')' | '"' | '\'' | '`' | ',' | ';')
+}
+
+fn parse_number_literal(text: &str) -> Option<ParsedNumber> {
+    if let Ok(number) = text.parse::<i64>() {
+        return Some(ParsedNumber::Integer(number));
+    }
+
+    if looks_like_inexact_literal(text) {
+        return text.parse::<f64>().ok().map(ParsedNumber::Float);
+    }
+
+    None
+}
+
+fn looks_like_inexact_literal(text: &str) -> bool {
+    text.chars().any(|ch| ch.is_ascii_digit())
+        && (text.contains('.') || text.contains('e') || text.contains('E'))
 }

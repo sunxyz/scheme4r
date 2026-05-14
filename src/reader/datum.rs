@@ -1,9 +1,10 @@
 use std::fmt;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Datum {
     Boolean(bool),
     Number(i64),
+    Float(f64),
     Character(char),
     String(String),
     Symbol(String),
@@ -61,6 +62,7 @@ impl fmt::Display for Datum {
         match self {
             Self::Boolean(value) => write!(f, "{}", if *value { "#t" } else { "#f" }),
             Self::Number(value) => write!(f, "{value}"),
+            Self::Float(value) => write!(f, "{}", fmt_inexact_number(*value)),
             Self::Character(value) => write!(f, "{}", fmt_character(*value)),
             Self::String(value) => write!(f, "\"{}\"", value),
             Self::Symbol(value) => write!(f, "{value}"),
@@ -110,6 +112,25 @@ pub(crate) fn fmt_character(value: char) -> String {
         '\n' => "#\\newline".to_string(),
         ch => format!("#\\{ch}"),
     }
+}
+
+pub(crate) fn fmt_inexact_number(value: f64) -> String {
+    if value.is_nan() {
+        return "+nan.0".to_string();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            "-inf.0".to_string()
+        } else {
+            "+inf.0".to_string()
+        };
+    }
+
+    let mut text = value.to_string();
+    if !text.contains('.') && !text.contains('e') && !text.contains('E') {
+        text.push_str(".0");
+    }
+    text
 }
 
 fn fmt_pair(datum: &Datum, f: &mut fmt::Formatter<'_>) -> fmt::Result {

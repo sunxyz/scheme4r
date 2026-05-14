@@ -9,6 +9,7 @@ pub type DictRef = Rc<RefCell<DictMap>>;
 pub enum DictKey {
     Boolean(bool),
     Number(i64),
+    Float(u64),
     Character(char),
     String(String),
     Symbol(String),
@@ -20,6 +21,7 @@ impl DictKey {
         match value {
             Value::Boolean(v) => Some(Self::Boolean(*v)),
             Value::Number(v) => Some(Self::Number(*v)),
+            Value::Float(v) => Some(Self::Float(canonical_float_bits(*v))),
             Value::Character(v) => Some(Self::Character(*v)),
             Value::String(v) => Some(Self::String(v.to_plain_string())),
             Value::Symbol(v) => Some(Self::Symbol(v.clone())),
@@ -32,10 +34,19 @@ impl DictKey {
         match self {
             Self::Boolean(v) => Value::Boolean(*v),
             Self::Number(v) => Value::Number(*v),
+            Self::Float(v) => Value::Float(f64::from_bits(*v)),
             Self::Character(v) => Value::Character(*v),
             Self::String(v) => Value::string(v.clone()),
             Self::Symbol(v) => Value::symbol(v.clone()),
             Self::EmptyList => Value::EmptyList,
         }
+    }
+}
+
+fn canonical_float_bits(value: f64) -> u64 {
+    if value == 0.0 {
+        0.0f64.to_bits()
+    } else {
+        value.to_bits()
     }
 }

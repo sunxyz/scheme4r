@@ -96,6 +96,7 @@ fn match_pattern(
     match pattern {
         Datum::Boolean(value) => Ok(matches!(input, Datum::Boolean(other) if other == value)),
         Datum::Number(value) => Ok(matches!(input, Datum::Number(other) if other == value)),
+        Datum::Float(value) => Ok(matches!(input, Datum::Float(other) if other == value)),
         Datum::Character(value) => Ok(matches!(input, Datum::Character(other) if other == value)),
         Datum::String(value) => Ok(matches!(input, Datum::String(other) if other == value)),
         Datum::ByteVector(value) => Ok(matches!(input, Datum::ByteVector(other) if other == value)),
@@ -213,6 +214,7 @@ fn match_pattern_iteration(
     match pattern {
         Datum::Boolean(value) => Ok(matches!(input, Datum::Boolean(other) if other == value)),
         Datum::Number(value) => Ok(matches!(input, Datum::Number(other) if other == value)),
+        Datum::Float(value) => Ok(matches!(input, Datum::Float(other) if other == value)),
         Datum::Character(value) => Ok(matches!(input, Datum::Character(other) if other == value)),
         Datum::String(value) => Ok(matches!(input, Datum::String(other) if other == value)),
         Datum::ByteVector(value) => Ok(matches!(input, Datum::ByteVector(other) if other == value)),
@@ -326,6 +328,7 @@ fn expand_template(
     match template {
         Datum::Boolean(_)
         | Datum::Number(_)
+        | Datum::Float(_)
         | Datum::Character(_)
         | Datum::String(_)
         | Datum::ByteVector(_)

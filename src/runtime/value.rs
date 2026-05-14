@@ -5,7 +5,10 @@ use std::{
 };
 
 use crate::{
-    reader::{datum::fmt_character, Datum},
+    reader::{
+        datum::{fmt_character, fmt_inexact_number},
+        Datum,
+    },
     runtime::{
         dict::{DictMap, DictRef},
         environment::EnvRef,
@@ -13,6 +16,7 @@ use crate::{
         pair::{PairCell, PairRef},
         parameter::ParameterRef,
         port::PortRef,
+        promise::PromiseRef,
         procedure::{BuiltinFn, LambdaClause, NativeFn, Procedure, ProcedureRef},
         record::RecordRef,
     },
@@ -67,6 +71,7 @@ impl PartialEq<SchemeString> for &str {
 pub enum Value {
     Boolean(bool),
     Number(i64),
+    Float(f64),
     Character(char),
     String(SchemeString),
     Symbol(String),
@@ -79,6 +84,7 @@ pub enum Value {
     ErrorObject(ErrorObjectRef),
     Parameter(ParameterRef),
     Environment(EnvRef),
+    Promise(PromiseRef),
     Continuation(usize),
     EmptyList,
     Procedure(ProcedureRef),
@@ -128,6 +134,10 @@ impl Value {
         Self::Parameter(parameter)
     }
 
+    pub fn promise(promise: PromiseRef) -> Self {
+        Self::Promise(promise)
+    }
+
     pub fn list(items: Vec<Value>) -> Self {
         Self::list_with_tail(items, Self::EmptyList)
     }
@@ -173,6 +183,7 @@ impl Value {
         match datum {
             Datum::Boolean(value) => Self::Boolean(*value),
             Datum::Number(value) => Self::Number(*value),
+            Datum::Float(value) => Self::Float(*value),
             Datum::Character(value) => Self::Character(*value),
             Datum::String(value) => Self::string(value.clone()),
             Datum::Symbol(value) => Self::symbol(value.clone()),
@@ -187,6 +198,7 @@ impl Value {
         match self {
             Self::Boolean(value) => Ok(Datum::Boolean(*value)),
             Self::Number(value) => Ok(Datum::Number(*value)),
+            Self::Float(value) => Ok(Datum::Float(*value)),
             Self::Character(value) => Ok(Datum::Character(*value)),
             Self::String(value) => Ok(Datum::String(value.to_plain_string())),
             Self::Symbol(value) => Ok(Datum::Symbol(value.clone())),
@@ -220,6 +232,9 @@ impl Value {
             )),
             Self::Environment(_) => Err(crate::error::SchemeError::type_error(
                 "cannot convert an environment specifier to datum",
+            )),
+            Self::Promise(_) => Err(crate::error::SchemeError::type_error(
+                "cannot convert a promise to datum",
             )),
             Self::Multiple(_) => Err(crate::error::SchemeError::type_error(
                 "cannot convert multiple values to datum",
@@ -273,6 +288,9 @@ impl Value {
         match (a, b) {
             (Self::Boolean(left), Self::Boolean(right)) => left == right,
             (Self::Number(left), Self::Number(right)) => left == right,
+            (Self::Float(left), Self::Float(right)) => left == right,
+            (Self::Number(left), Self::Float(right)) => (*left as f64) == *right,
+            (Self::Float(left), Self::Number(right)) => *left == (*right as f64),
             (Self::Character(left), Self::Character(right)) => left == right,
             (Self::String(left), Self::String(right)) => left == right,
             (Self::Symbol(left), Self::Symbol(right)) => left == right,
@@ -295,6 +313,7 @@ impl Value {
             (Self::ErrorObject(left), Self::ErrorObject(right)) => Rc::ptr_eq(left, right),
             (Self::Parameter(left), Self::Parameter(right)) => Rc::ptr_eq(left, right),
             (Self::Environment(left), Self::Environment(right)) => Rc::ptr_eq(left, right),
+            (Self::Promise(left), Self::Promise(right)) => Rc::ptr_eq(left, right),
             (Self::Continuation(left), Self::Continuation(right)) => left == right,
             (Self::Procedure(left), Self::Procedure(right)) => Rc::ptr_eq(left, right),
             _ => false,
@@ -360,6 +379,7 @@ impl fmt::Display for Value {
         match self {
             Self::Boolean(value) => write!(f, "{}", if *value { "#t" } else { "#f" }),
             Self::Number(value) => write!(f, "{value}"),
+            Self::Float(value) => write!(f, "{}", fmt_inexact_number(*value)),
             Self::Character(value) => write!(f, "{}", fmt_character(*value)),
             Self::String(value) => write!(f, "\"{}\"", value.borrow()),
             Self::Symbol(value) => write!(f, "{value}"),
@@ -385,6 +405,7 @@ impl fmt::Display for Value {
             Self::ErrorObject(error) => write!(f, "#<error-object:{}>", error.message()),
             Self::Parameter(_) => write!(f, "#<parameter>"),
             Self::Environment(_) => write!(f, "#<environment>"),
+            Self::Promise(_) => write!(f, "#<promise>"),
             Self::Continuation(_) => write!(f, "#<continuation>"),
             Self::EmptyList => write!(f, "()"),
             Self::Procedure(proc) => match proc.name() {

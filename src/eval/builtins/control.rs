@@ -25,6 +25,7 @@ pub(super) fn install(env: &mut Environment) {
     define_builtin(env, "read-error?", read_error);
     define_builtin(env, "file-error?", file_error);
     define_builtin(env, "make-parameter", make_parameter);
+    define_builtin(env, "force", force);
     define_builtin(env, "values", values);
     define_builtin(env, "call-with-values", call_with_values);
 }
@@ -170,6 +171,11 @@ fn make_parameter(_: &Engine, args: &[Value]) -> Result<Value, SchemeError> {
     }
     let parameter = ParameterObject::new(args[0].clone(), args.get(1).cloned());
     Ok(Value::parameter(parameter))
+}
+
+fn force(engine: &Engine, args: &[Value]) -> Result<Value, SchemeError> {
+    expect_arity("force", args, 1)?;
+    engine.force_value(args[0].clone())
 }
 
 fn next_continuation_token() -> usize {

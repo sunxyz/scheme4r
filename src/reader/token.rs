@@ -1,6 +1,6 @@
 use crate::reader::span::Span;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TokenKind {
     LParen,
     RParen,
@@ -13,13 +13,14 @@ pub enum TokenKind {
     ByteVectorStart,
     Boolean(bool),
     Number(i64),
+    Float(f64),
     Character(char),
     String(String),
     Symbol(String),
     Eof,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,

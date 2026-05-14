@@ -16,8 +16,16 @@ impl<'a> Reader<'a> {
         Self { source }
     }
 
+    pub fn with_fold_case(source: &'a str) -> Self {
+        Self { source }
+    }
+
     pub fn read_all(&self) -> Result<Vec<Datum>, SchemeError> {
         Parser::new(Lexer::new(self.source)).parse_all()
+    }
+
+    pub fn read_all_with_fold_case(&self) -> Result<Vec<Datum>, SchemeError> {
+        Parser::new(Lexer::with_fold_case(self.source, true)).parse_all()
     }
 
     pub fn read_one(&self) -> Result<Option<(Datum, usize)>, SchemeError> {
@@ -63,6 +71,7 @@ impl<'a> Parser<'a> {
         match token.kind {
             TokenKind::Boolean(value) => Ok(Datum::Boolean(value)),
             TokenKind::Number(value) => Ok(Datum::Number(value)),
+            TokenKind::Float(value) => Ok(Datum::Float(value)),
             TokenKind::Character(value) => Ok(Datum::Character(value)),
             TokenKind::String(value) => Ok(Datum::String(value)),
             TokenKind::Symbol(value) => Ok(Datum::Symbol(value)),
@@ -158,7 +167,7 @@ impl<'a> Parser<'a> {
             let datum = self.expression()?;
             match datum {
                 Datum::Number(value) if (0..=255).contains(&value) => bytes.push(value as u8),
-                Datum::Number(_) => {
+                Datum::Number(_) | Datum::Float(_) => {
                     return Err(SchemeError::syntax(
                         "bytevector elements must be in range 0..=255",
                         Some(start.span),
@@ -249,6 +258,7 @@ impl SameVariant for TokenKind {
                 | (TokenKind::ByteVectorStart, TokenKind::ByteVectorStart)
                 | (TokenKind::Boolean(_), TokenKind::Boolean(_))
                 | (TokenKind::Number(_), TokenKind::Number(_))
+                | (TokenKind::Float(_), TokenKind::Float(_))
                 | (TokenKind::Character(_), TokenKind::Character(_))
                 | (TokenKind::String(_), TokenKind::String(_))
                 | (TokenKind::Symbol(_), TokenKind::Symbol(_))

@@ -54,10 +54,19 @@ impl Environment {
         for name in NON_BASE_LIBRARY_NAMES {
             base_bindings.remove(*name);
         }
-        let base_library = Library::new(base_bindings);
-        let read_library = Library::new(select_bindings(&bindings, STANDARD_READ_LIBRARY_NAMES));
-        let write_library = Library::new(select_bindings(&bindings, STANDARD_WRITE_LIBRARY_NAMES));
-        let eval_library = Library::new(select_bindings(&bindings, STANDARD_EVAL_LIBRARY_NAMES));
+        let base_library = Library::new(base_bindings, HashMap::new());
+        let read_library = Library::new(
+            select_bindings(&bindings, STANDARD_READ_LIBRARY_NAMES),
+            HashMap::new(),
+        );
+        let write_library = Library::new(
+            select_bindings(&bindings, STANDARD_WRITE_LIBRARY_NAMES),
+            HashMap::new(),
+        );
+        let eval_library = Library::new(
+            select_bindings(&bindings, STANDARD_EVAL_LIBRARY_NAMES),
+            HashMap::new(),
+        );
         {
             let mut env_mut = env.borrow_mut();
             env_mut.define_library("scheme base", base_library);
@@ -92,6 +101,13 @@ impl Environment {
         }
     }
 
+    pub fn import_syntax_bindings(&mut self, bindings: &HashMap<String, SyntaxRules>) {
+        for (name, transformer) in bindings {
+            self.syntax_bindings
+                .insert(name.clone(), transformer.clone());
+        }
+    }
+
     pub fn lookup(&self, name: &str) -> Result<Value, SchemeError> {
         if let Some(value) = self.bindings.get(name) {
             return Ok(value.clone());
@@ -114,6 +130,14 @@ impl Environment {
         }
 
         None
+    }
+
+    pub fn lookup_local(&self, name: &str) -> Option<Value> {
+        self.bindings.get(name).cloned()
+    }
+
+    pub fn lookup_local_syntax(&self, name: &str) -> Option<SyntaxRules> {
+        self.syntax_bindings.get(name).cloned()
     }
 
     pub fn set(&mut self, name: &str, value: Value) -> Result<(), SchemeError> {

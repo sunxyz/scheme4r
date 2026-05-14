@@ -185,7 +185,10 @@ fn load(engine: &Engine, args: &[Value]) -> Result<Value, SchemeError> {
     let path = expect_string("load", &args[0])?;
     let source = fs::read_to_string(&path)
         .map_err(|err| SchemeError::io(format!("failed to load '{path}': {err}")))?;
-    engine.run_in_env(&source, engine.current_env())
+    let source_dir = std::path::Path::new(&path)
+        .parent()
+        .map(|parent| parent.to_path_buf());
+    engine.run_in_env_with_source_dir(&source, engine.current_env(), source_dir)
 }
 
 fn current_input_port(engine: &Engine, args: &[Value]) -> Result<Value, SchemeError> {

@@ -1,6 +1,8 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
+    fs,
+    path::PathBuf,
     rc::Rc,
 };
 
@@ -33,6 +35,17 @@ enum EvalStep {
         after: Value,
         env: EnvRef,
     },
+    Parameterize {
+        bindings: Vec<(crate::runtime::ParameterRef, Value)>,
+        env: EnvRef,
+        body: Vec<Datum>,
+    },
+    Guard {
+        var: String,
+        clauses: Vec<Datum>,
+        env: EnvRef,
+        body: Vec<Datum>,
+    },
     WithExceptionHandler {
         handler: Value,
         thunk: Value,
@@ -54,6 +67,14 @@ enum ControlFrame {
         after: Value,
         env: EnvRef,
         stage: DynamicWindStage,
+    },
+    Parameterize {
+        saved: Vec<(crate::runtime::ParameterRef, Value)>,
+    },
+    Guard {
+        var: String,
+        clauses: Vec<Datum>,
+        env: EnvRef,
     },
     WithExceptionHandler {
         handler: Value,
@@ -78,6 +99,7 @@ pub struct Engine {
     root_env: EnvRef,
     port_state: Rc<RefCell<PortState>>,
     env_stack: RefCell<Vec<EnvRef>>,
+    source_dirs: RefCell<Vec<Option<PathBuf>>>,
 }
 
 impl Engine {
@@ -90,6 +112,7 @@ impl Engine {
                 current_error: Port::stdout(),
             })),
             env_stack: RefCell::new(Vec::new()),
+            source_dirs: RefCell::new(Vec::new()),
         }
     }
 
@@ -98,12 +121,26 @@ impl Engine {
     }
 
     pub(crate) fn run_in_env(&self, source: &str, env: EnvRef) -> Result<Value, SchemeError> {
-        let forms = Reader::new(source).read_all()?;
-        let mut result = Value::Unspecified;
-        for form in forms {
-            result = self.eval_datum(&form, env.clone())?;
-        }
-        Ok(result)
+        self.run_in_env_with_source_dir(source, env, None)
+    }
+
+    pub(crate) fn run_in_env_with_source_dir(
+        &self,
+        source: &str,
+        env: EnvRef,
+        source_dir: Option<PathBuf>,
+    ) -> Result<Value, SchemeError> {
+        self.source_dirs.borrow_mut().push(source_dir);
+        let result = (|| {
+            let forms = Reader::new(source).read_all()?;
+            let mut result = Value::Unspecified;
+            for form in forms {
+                result = self.eval_datum(&form, env.clone())?;
+            }
+            Ok(result)
+        })();
+        self.source_dirs.borrow_mut().pop();
+        result
     }
 
     pub(crate) fn eval_datum(&self, expr: &Datum, env: EnvRef) -> Result<Value, SchemeError> {
@@ -130,6 +167,14 @@ impl Engine {
         self.port_state.borrow().current_error.clone()
     }
 
+    fn current_source_dir(&self) -> Option<PathBuf> {
+        self.source_dirs
+            .borrow()
+            .last()
+            .cloned()
+            .flatten()
+    }
+
     pub(crate) fn build_environment_from_import_sets(
         &self,
         args: &[Value],
@@ -141,12 +186,16 @@ impl Engine {
         }
 
         let env = Environment::isolated_with_registry(self.root_env.clone());
-        let mut imported = HashMap::new();
+        let mut imported = ImportSet::default();
         for arg in args {
             let datum = arg.to_datum()?;
             imported.extend(resolve_import_set(&datum, env.clone())?);
         }
-        env.borrow_mut().import_bindings(&imported);
+        {
+            let mut env_mut = env.borrow_mut();
+            env_mut.import_bindings(imported.bindings());
+            env_mut.import_syntax_bindings(imported.syntax_bindings());
+        }
         Ok(env)
     }
 
@@ -160,6 +209,42 @@ impl Engine {
             other => Err(SchemeError::type_error(format!(
                 "'{name}' expected an environment specifier, got {other}"
             ))),
+        }
+    }
+
+    pub(crate) fn force_value(&self, value: Value) -> Result<Value, SchemeError> {
+        let mut current = value;
+        loop {
+            let Value::Promise(promise) = current else {
+                return Ok(current);
+            };
+
+            if let Some(value) = promise.forced_value() {
+                current = value;
+                continue;
+            }
+
+            let pending = promise.take_pending()?;
+            let evaluated = match self.eval_datum(pending.expr(), pending.env()) {
+                Ok(value) => value,
+                Err(err) => {
+                    promise.restore_pending(pending);
+                    return Err(err);
+                }
+            };
+            let final_value = if pending.force_result() {
+                match self.force_value(evaluated) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        promise.restore_pending(pending);
+                        return Err(err);
+                    }
+                }
+            } else {
+                evaluated
+            };
+            promise.store_forced(final_value.clone());
+            return Ok(final_value);
         }
     }
 
@@ -185,6 +270,216 @@ impl Engine {
     fn eval_single(&self, expr: &Datum, env: EnvRef, context: &str) -> Result<Value, SchemeError> {
         let value = self.eval(expr, env)?;
         self.require_single_value(value, context)
+    }
+
+    fn convert_parameter_value(
+        &self,
+        parameter: &crate::runtime::ParameterRef,
+        env: EnvRef,
+        value: Value,
+    ) -> Result<Value, SchemeError> {
+        match parameter.converter() {
+            Some(converter) => self.apply(converter, env, vec![value]),
+            None => Ok(value),
+        }
+    }
+
+    fn restore_parameter_values(
+        &self,
+        saved: Vec<(crate::runtime::ParameterRef, Value)>,
+    ) {
+        for (parameter, value) in saved.into_iter().rev() {
+            *parameter.cell().borrow_mut() = value;
+        }
+    }
+
+    fn eval_guard_clauses(
+        &self,
+        clauses: &[Datum],
+        env: EnvRef,
+    ) -> Result<Option<EvalStep>, SchemeError> {
+        for (index, clause) in clauses.iter().enumerate() {
+            let entries = clause
+                .collect_proper_list()
+                .ok_or_else(|| SchemeError::syntax("'guard' clauses must be proper lists", None))?;
+
+            let Some(test) = entries.first() else {
+                return Err(SchemeError::syntax("'guard' clauses cannot be empty", None));
+            };
+
+            if test.as_symbol() == Some("else") {
+                if index + 1 != clauses.len() {
+                    return Err(SchemeError::syntax("'guard' else clause must be last", None));
+                }
+                return Ok(Some(self.eval_begin(&entries[1..], env)?));
+            }
+
+            let test_value = self.eval_single(test, env.clone(), "'guard' test expression")?;
+            if !test_value.is_truthy() {
+                continue;
+            }
+
+            if entries.len() == 1 {
+                return Ok(Some(EvalStep::Done(test_value)));
+            }
+
+            if entries.get(1).and_then(|datum| datum.as_symbol()) == Some("=>") {
+                if entries.len() != 3 {
+                    return Err(SchemeError::syntax(
+                        "'guard' => clause must contain exactly one recipient expression",
+                        None,
+                    ));
+                }
+                let recipient = self.eval_single(entries[2], env.clone(), "'guard' recipient")?;
+                return Ok(Some(EvalStep::Apply(recipient, env, vec![test_value])));
+            }
+
+            return Ok(Some(self.eval_begin(&entries[1..], env)?));
+        }
+
+        Ok(None)
+    }
+
+    fn feature_requirement_matches(
+        &self,
+        requirement: &Datum,
+        env: EnvRef,
+    ) -> Result<bool, SchemeError> {
+        match requirement {
+            Datum::Symbol(name) => Ok(match name.as_str() {
+                "scheme4r" | "r7rs" => true,
+                "else" => false,
+                _ => false,
+            }),
+            Datum::Pair(_, _) => {
+                let items = requirement.collect_proper_list().ok_or_else(|| {
+                    SchemeError::syntax("feature requirement must be a proper list", None)
+                })?;
+                let Some(keyword) = items.first().and_then(|item| item.as_symbol()) else {
+                    return Err(SchemeError::syntax(
+                        "feature requirement must begin with an identifier",
+                        None,
+                    ));
+                };
+
+                match keyword {
+                    "and" => {
+                        for item in &items[1..] {
+                            if !self.feature_requirement_matches(item, env.clone())? {
+                                return Ok(false);
+                            }
+                        }
+                        Ok(true)
+                    }
+                    "or" => {
+                        for item in &items[1..] {
+                            if self.feature_requirement_matches(item, env.clone())? {
+                                return Ok(true);
+                            }
+                        }
+                        Ok(false)
+                    }
+                    "not" => {
+                        if items.len() != 2 {
+                            return Err(SchemeError::arity(
+                                "'not' feature requirement expects exactly 1 child requirement",
+                            ));
+                        }
+                        Ok(!self.feature_requirement_matches(items[1], env)?)
+                    }
+                    "library" => {
+                        if items.len() != 2 {
+                            return Err(SchemeError::arity(
+                                "'library' feature requirement expects exactly 1 library name",
+                            ));
+                        }
+                        let library_name = parse_library_name(items[1])?;
+                        Ok(env.borrow().lookup_library(&library_name).is_some())
+                    }
+                    _ => Err(SchemeError::syntax(
+                        format!("unsupported feature requirement: {keyword}"),
+                        None,
+                    )),
+                }
+            }
+            _ => Err(SchemeError::syntax(
+                "feature requirement must be an identifier or list",
+                None,
+            )),
+        }
+    }
+
+    fn resolve_source_path(&self, path: &str) -> PathBuf {
+        let candidate = PathBuf::from(path);
+        if candidate.is_absolute() {
+            return candidate;
+        }
+
+        match self.current_source_dir() {
+            Some(dir) => dir.join(candidate),
+            None => candidate,
+        }
+    }
+
+    fn read_included_forms(
+        &self,
+        paths: &[&Datum],
+        fold_case: bool,
+    ) -> Result<Vec<Datum>, SchemeError> {
+        let mut forms = Vec::new();
+        for path_datum in paths {
+            let Datum::String(path) = path_datum else {
+                return Err(SchemeError::syntax(
+                    "include paths must be string literals",
+                    None,
+                ));
+            };
+            let resolved = self.resolve_source_path(path);
+            let source = fs::read_to_string(&resolved).map_err(|err| {
+                SchemeError::io(format!("failed to include '{}': {err}", resolved.display()))
+            })?;
+            let mut file_forms = if fold_case {
+                Reader::new(&source).read_all_with_fold_case()?
+            } else {
+                Reader::new(&source).read_all()?
+            };
+            forms.append(&mut file_forms);
+        }
+        Ok(forms)
+    }
+
+    fn select_cond_expand_forms(
+        &self,
+        clauses: &[&Datum],
+        env: EnvRef,
+    ) -> Result<Vec<Datum>, SchemeError> {
+        for (index, clause) in clauses.iter().enumerate() {
+            let entries = clause.collect_proper_list().ok_or_else(|| {
+                SchemeError::syntax("'cond-expand' clauses must be proper lists", None)
+            })?;
+            let Some(requirement) = entries.first() else {
+                return Err(SchemeError::syntax(
+                    "'cond-expand' clauses cannot be empty",
+                    None,
+                ));
+            };
+
+            if requirement.as_symbol() == Some("else") {
+                if index + 1 != clauses.len() {
+                    return Err(SchemeError::syntax(
+                        "'cond-expand' else clause must be last",
+                        None,
+                    ));
+                }
+                return Ok(entries[1..].iter().map(|datum| (*datum).clone()).collect());
+            }
+
+            if self.feature_requirement_matches(requirement, env.clone())? {
+                return Ok(entries[1..].iter().map(|datum| (*datum).clone()).collect());
+            }
+        }
+
+        Ok(Vec::new())
     }
 
     fn eval(&self, expr: &Datum, env: EnvRef) -> Result<Value, SchemeError> {
@@ -228,6 +523,33 @@ impl Engine {
                             stage: DynamicWindStage::Before { thunk },
                         });
                         DriverAction::Step(EvalStep::Apply(before, env, Vec::new()))
+                    }
+                    EvalStep::Parameterize { bindings, env, body } => {
+                        let mut saved = Vec::with_capacity(bindings.len());
+                        for (parameter, value) in bindings {
+                            let old_value = parameter.cell().borrow().clone();
+                            *parameter.cell().borrow_mut() = value;
+                            saved.push((parameter, old_value));
+                        }
+                        frames.push(ControlFrame::Parameterize { saved });
+                        let body_refs = body.iter().collect::<Vec<_>>();
+                        match self.eval_begin(&body_refs, env) {
+                            Ok(step) => DriverAction::Step(step),
+                            Err(err) => DriverAction::Raise(err),
+                        }
+                    }
+                    EvalStep::Guard {
+                        var,
+                        clauses,
+                        env,
+                        body,
+                    } => {
+                        frames.push(ControlFrame::Guard { var, clauses, env: env.clone() });
+                        let body_refs = body.iter().collect::<Vec<_>>();
+                        match self.eval_begin(&body_refs, env) {
+                            Ok(step) => DriverAction::Step(step),
+                            Err(err) => DriverAction::Raise(err),
+                        }
                     }
                     EvalStep::WithExceptionHandler { handler, thunk, env } => {
                         frames.push(ControlFrame::WithExceptionHandler {
@@ -282,6 +604,10 @@ impl Engine {
                         return DriverAction::Raise(err);
                     }
                 },
+                ControlFrame::Parameterize { saved } => {
+                    self.restore_parameter_values(saved);
+                }
+                ControlFrame::Guard { .. } => {}
                 ControlFrame::WithExceptionHandler { stage, .. } => match stage {
                     ExceptionHandlerStage::Thunk => {}
                     ExceptionHandlerStage::HandlerResult { continuable } => {
@@ -321,6 +647,20 @@ impl Engine {
                     }
                     DynamicWindStage::AfterValue(_) | DynamicWindStage::AfterError(_) => {}
                 },
+                ControlFrame::Parameterize { saved } => {
+                    self.restore_parameter_values(saved);
+                }
+                ControlFrame::Guard { var, clauses, env } => {
+                    if let Some((object, _)) = err.as_raised() {
+                        let guard_env = Environment::child(env);
+                        guard_env.borrow_mut().define(var, object.clone());
+                        match self.eval_guard_clauses(&clauses, guard_env) {
+                            Ok(Some(step)) => return DriverAction::Step(step),
+                            Ok(None) => {}
+                            Err(guard_err) => return DriverAction::Raise(guard_err),
+                        }
+                    }
+                }
                 ControlFrame::WithExceptionHandler {
                     handler,
                     env,
@@ -350,6 +690,7 @@ impl Engine {
         match expr {
             Datum::Boolean(value) => Ok(EvalStep::Done(Value::Boolean(*value))),
             Datum::Number(value) => Ok(EvalStep::Done(Value::Number(*value))),
+            Datum::Float(value) => Ok(EvalStep::Done(Value::Float(*value))),
             Datum::Character(value) => Ok(EvalStep::Done(Value::Character(*value))),
             Datum::String(value) => Ok(EvalStep::Done(Value::string(value.clone()))),
             Datum::Vector(values) => Ok(EvalStep::Done(Value::vector(
@@ -384,6 +725,10 @@ impl Engine {
                 "define-library" => return self.eval_define_library(&items, env),
                 "lambda" => return self.eval_lambda(&items, env, None),
                 "case-lambda" => return self.eval_case_lambda(&items, env, None),
+                "delay" => return self.eval_delay(&items, env, false),
+                "delay-force" => return self.eval_delay(&items, env, true),
+                "include" => return self.eval_include(&items, env, false),
+                "include-ci" => return self.eval_include(&items, env, true),
                 "begin" => return self.eval_begin(&items[1..], env),
                 "set!" => return self.eval_set(&items, env),
                 "and" => return self.eval_and(&items[1..], env),
@@ -393,11 +738,14 @@ impl Engine {
                 "letrec" => return self.eval_letrec(&items, env),
                 "let-values" => return self.eval_let_values(&items, env),
                 "let*-values" => return self.eval_let_star_values(&items, env),
+                "parameterize" => return self.eval_parameterize(&items, env),
                 "let-syntax" => return self.eval_let_syntax(&items, env),
                 "letrec-syntax" => return self.eval_letrec_syntax(&items, env),
                 "cond" => return self.eval_cond(&items[1..], env),
+                "cond-expand" => return self.eval_cond_expand(&items[1..], env),
                 "case" => return self.eval_case(&items[1..], env),
                 "do" => return self.eval_do(&items, env),
+                "guard" => return self.eval_guard(&items, env),
                 _ => {}
             }
 
@@ -728,6 +1076,45 @@ impl Engine {
         Ok(EvalStep::Done(Value::case_lambda(name, clauses, env)))
     }
 
+    fn eval_delay(
+        &self,
+        items: &[&Datum],
+        env: EnvRef,
+        force_result: bool,
+    ) -> Result<EvalStep, SchemeError> {
+        if items.len() != 2 {
+            return Err(SchemeError::arity(if force_result {
+                "'delay-force' expects exactly 1 argument"
+            } else {
+                "'delay' expects exactly 1 argument"
+            }));
+        }
+
+        Ok(EvalStep::Done(Value::promise(crate::runtime::PromiseObject::new(
+            items[1].clone(),
+            env,
+            force_result,
+        ))))
+    }
+
+    fn eval_include(
+        &self,
+        items: &[&Datum],
+        env: EnvRef,
+        fold_case: bool,
+    ) -> Result<EvalStep, SchemeError> {
+        if items.len() < 2 {
+            return Err(SchemeError::arity(if fold_case {
+                "'include-ci' expects at least 1 file path"
+            } else {
+                "'include' expects at least 1 file path"
+            }));
+        }
+
+        let forms = self.read_included_forms(&items[1..], fold_case)?;
+        self.eval_forms_as_step(forms, env)
+    }
+
     fn eval_define_syntax(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         if items.len() != 3 {
             return Err(SchemeError::arity(
@@ -754,11 +1141,13 @@ impl Engine {
             ));
         }
 
-        let mut imported = HashMap::new();
+        let mut imported = ImportSet::default();
         for item in items {
             imported.extend(resolve_import_set(item, env.clone())?);
         }
-        env.borrow_mut().import_bindings(&imported);
+        let mut env_mut = env.borrow_mut();
+        env_mut.import_bindings(imported.bindings());
+        env_mut.import_syntax_bindings(imported.syntax_bindings());
         Ok(EvalStep::Done(Value::Unspecified))
     }
 
@@ -773,8 +1162,12 @@ impl Engine {
         let library_env = Environment::isolated_with_registry(env.clone());
         let mut exports = Vec::new();
         let mut begin_forms = Vec::new();
+        let mut declarations = items[2..]
+            .iter()
+            .map(|datum| (*datum).clone())
+            .collect::<VecDeque<_>>();
 
-        for declaration in &items[2..] {
+        while let Some(declaration) = declarations.pop_front() {
             let parts = declaration.collect_proper_list().ok_or_else(|| {
                 SchemeError::syntax("'define-library' declarations must be proper lists", None)
             })?;
@@ -788,13 +1181,33 @@ impl Engine {
             match keyword {
                 "export" => exports.extend(parse_export_specs(&parts[1..])?),
                 "import" => {
-                    let mut imported = HashMap::new();
+                    let mut imported = ImportSet::default();
                     for import_set in &parts[1..] {
                         imported.extend(resolve_import_set(import_set, env.clone())?);
                     }
-                    library_env.borrow_mut().import_bindings(&imported);
+                    let mut library_env_mut = library_env.borrow_mut();
+                    library_env_mut.import_bindings(imported.bindings());
+                    library_env_mut.import_syntax_bindings(imported.syntax_bindings());
                 }
-                "begin" => begin_forms.extend(parts[1..].iter().copied()),
+                "begin" => begin_forms.extend(parts[1..].iter().map(|datum| (*datum).clone())),
+                "cond-expand" => {
+                    let expanded = self.select_cond_expand_forms(&parts[1..], env.clone())?;
+                    for datum in expanded.into_iter().rev() {
+                        declarations.push_front(datum);
+                    }
+                }
+                "include" => {
+                    let expanded = self.read_included_forms(&parts[1..], false)?;
+                    for datum in expanded.into_iter().rev() {
+                        declarations.push_front(datum);
+                    }
+                }
+                "include-ci" | "include-library-declarations" => {
+                    let expanded = self.read_included_forms(&parts[1..], keyword == "include-ci")?;
+                    for datum in expanded.into_iter().rev() {
+                        declarations.push_front(datum);
+                    }
+                }
                 _ => {
                     return Err(SchemeError::syntax(
                         format!("unsupported library declaration: {keyword}"),
@@ -805,14 +1218,60 @@ impl Engine {
         }
 
         if !begin_forms.is_empty() {
-            let step = self.eval_begin(&begin_forms, library_env.clone())?;
+            let begin_refs = begin_forms.iter().collect::<Vec<_>>();
+            let step = self.eval_begin(&begin_refs, library_env.clone())?;
             self.drive_step(step)?;
         }
 
         let exported_bindings = collect_library_exports(&library_env, &exports)?;
-        env.borrow_mut()
-            .define_library(library_name, Library::new(exported_bindings));
+        env.borrow_mut().define_library(
+            library_name,
+            Library::new(exported_bindings.values, exported_bindings.syntax),
+        );
         Ok(EvalStep::Done(Value::Unspecified))
+    }
+
+    fn eval_parameterize(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
+        if items.len() < 3 {
+            return Err(SchemeError::arity(
+                "'parameterize' expects bindings and at least 1 body expression",
+            ));
+        }
+
+        let binding_datums = items[1]
+            .collect_proper_list()
+            .ok_or_else(|| SchemeError::syntax("'parameterize' binding list must be proper", None))?;
+
+        let mut bindings = Vec::with_capacity(binding_datums.len());
+        for binding in binding_datums {
+            let parts = binding
+                .collect_proper_list()
+                .ok_or_else(|| SchemeError::syntax("'parameterize' binding must be proper", None))?;
+            if parts.len() != 2 {
+                return Err(SchemeError::syntax(
+                    "each 'parameterize' binding must contain exactly a parameter and a value",
+                    None,
+                ));
+            }
+
+            let parameter_value =
+                self.eval_single(parts[0], env.clone(), "'parameterize' parameter expression")?;
+            let Value::Parameter(parameter) = parameter_value else {
+                return Err(SchemeError::type_error(
+                    "'parameterize' expected a parameter object",
+                ));
+            };
+            let raw_value =
+                self.eval_single(parts[1], env.clone(), "'parameterize' value expression")?;
+            let converted = self.convert_parameter_value(&parameter, env.clone(), raw_value)?;
+            bindings.push((parameter, converted));
+        }
+
+        let body = items[2..]
+            .iter()
+            .map(|datum| (*datum).clone())
+            .collect::<Vec<_>>();
+        Ok(EvalStep::Parameterize { bindings, env, body })
     }
 
     fn eval_let_syntax(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
@@ -1097,6 +1556,12 @@ impl Engine {
         Ok(EvalStep::Done(Value::Unspecified))
     }
 
+    fn eval_cond_expand(&self, clauses: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
+        let selected = self.select_cond_expand_forms(clauses, env.clone())?;
+        let refs = selected.iter().collect::<Vec<_>>();
+        self.eval_begin(&refs, env)
+    }
+
     fn eval_case(&self, clauses: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         let (key_expr, clause_exprs) = clauses
             .split_first()
@@ -1217,6 +1682,36 @@ impl Engine {
                 loop_env.borrow_mut().set(&name, value)?;
             }
         }
+    }
+
+    fn eval_guard(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
+        if items.len() < 3 {
+            return Err(SchemeError::arity(
+                "'guard' expects a clause header and at least 1 body expression",
+            ));
+        }
+
+        let header = items[1]
+            .collect_proper_list()
+            .ok_or_else(|| SchemeError::syntax("'guard' header must be a proper list", None))?;
+        let Some(Datum::Symbol(var)) = header.first() else {
+            return Err(SchemeError::syntax(
+                "'guard' header must begin with a symbol name",
+                None,
+            ));
+        };
+
+        let clauses = header[1..].iter().map(|datum| (*datum).clone()).collect::<Vec<_>>();
+        let body = items[2..]
+            .iter()
+            .map(|datum| (*datum).clone())
+            .collect::<Vec<_>>();
+        Ok(EvalStep::Guard {
+            var: var.clone(),
+            clauses,
+            env,
+            body,
+        })
     }
 
     fn eval_set(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
@@ -1556,6 +2051,7 @@ impl Engine {
         match datum {
             Datum::Boolean(value) => Ok(Value::Boolean(*value)),
             Datum::Number(value) => Ok(Value::Number(*value)),
+            Datum::Float(value) => Ok(Value::Float(*value)),
             Datum::Character(value) => Ok(Value::Character(*value)),
             Datum::String(value) => Ok(Value::string(value.clone())),
             Datum::Symbol(value) => Ok(Value::symbol(value.clone())),
@@ -2110,6 +2606,12 @@ fn parse_library_name(datum: &Datum) -> Result<String, SchemeError> {
         match item {
             Datum::Symbol(name) => parts.push(name.clone()),
             Datum::Number(number) => parts.push(number.to_string()),
+            Datum::Float(_) => {
+                return Err(SchemeError::syntax(
+                    "library name parts must be symbols or exact integers",
+                    None,
+                ));
+            }
             _ => {
                 return Err(SchemeError::syntax(
                     "library name parts must be symbols or numbers",
@@ -2166,16 +2668,30 @@ fn parse_export_specs(specs: &[&Datum]) -> Result<Vec<(String, String)>, SchemeE
 fn collect_library_exports(
     env: &EnvRef,
     exports: &[(String, String)],
-) -> Result<HashMap<String, Value>, SchemeError> {
+) -> Result<ImportSet, SchemeError> {
     let mut bindings = HashMap::new();
+    let mut syntax = HashMap::new();
     for (internal, external) in exports {
-        let value = env.borrow().lookup(internal)?;
-        bindings.insert(external.clone(), value);
+        let env_ref = env.borrow();
+        let mut found = false;
+        if let Some(value) = env_ref.lookup_local(internal) {
+            bindings.insert(external.clone(), value);
+            found = true;
+        }
+        if let Some(transformer) = env_ref.lookup_local_syntax(internal) {
+            syntax.insert(external.clone(), transformer);
+            found = true;
+        }
+        if !found {
+            return Err(SchemeError::name(format!(
+                "unknown export identifier: {internal}"
+            )));
+        }
     }
-    Ok(bindings)
+    Ok(ImportSet { values: bindings, syntax })
 }
 
-fn resolve_import_set(datum: &Datum, env: EnvRef) -> Result<HashMap<String, Value>, SchemeError> {
+fn resolve_import_set(datum: &Datum, env: EnvRef) -> Result<ImportSet, SchemeError> {
     let items = datum
         .collect_proper_list()
         .ok_or_else(|| SchemeError::syntax("import set must be a proper list", None))?;
@@ -2192,6 +2708,7 @@ fn resolve_import_set(datum: &Datum, env: EnvRef) -> Result<HashMap<String, Valu
             }
             let base = resolve_import_set(items[1], env)?;
             let mut bindings = HashMap::new();
+            let mut syntax = HashMap::new();
             for item in &items[2..] {
                 let Datum::Symbol(name) = item else {
                     return Err(SchemeError::syntax(
@@ -2199,12 +2716,22 @@ fn resolve_import_set(datum: &Datum, env: EnvRef) -> Result<HashMap<String, Valu
                         None,
                     ));
                 };
-                let value = base.get(name).ok_or_else(|| {
-                    SchemeError::name(format!("import set does not contain identifier: {name}"))
-                })?;
-                bindings.insert(name.clone(), value.clone());
+                let mut found = false;
+                if let Some(value) = base.values.get(name) {
+                    bindings.insert(name.clone(), value.clone());
+                    found = true;
+                }
+                if let Some(transformer) = base.syntax.get(name) {
+                    syntax.insert(name.clone(), transformer.clone());
+                    found = true;
+                }
+                if !found {
+                    return Err(SchemeError::name(format!(
+                        "import set does not contain identifier: {name}"
+                    )));
+                }
             }
-            Ok(bindings)
+            Ok(ImportSet { values: bindings, syntax })
         }
         "except" => {
             if items.len() < 2 {
@@ -2220,7 +2747,8 @@ fn resolve_import_set(datum: &Datum, env: EnvRef) -> Result<HashMap<String, Valu
                         None,
                     ));
                 };
-                base.remove(name);
+                base.values.remove(name);
+                base.syntax.remove(name);
             }
             Ok(base)
         }
@@ -2237,10 +2765,18 @@ fn resolve_import_set(datum: &Datum, env: EnvRef) -> Result<HashMap<String, Valu
                     None,
                 ));
             };
-            Ok(base
-                .into_iter()
-                .map(|(name, value)| (format!("{prefix}{name}"), value))
-                .collect())
+            Ok(ImportSet {
+                values: base
+                    .values
+                    .into_iter()
+                    .map(|(name, value)| (format!("{prefix}{name}"), value))
+                    .collect(),
+                syntax: base
+                    .syntax
+                    .into_iter()
+                    .map(|(name, transformer)| (format!("{prefix}{name}"), transformer))
+                    .collect(),
+            })
         }
         "rename" => {
             if items.len() < 3 {
@@ -2249,7 +2785,8 @@ fn resolve_import_set(datum: &Datum, env: EnvRef) -> Result<HashMap<String, Valu
                 ));
             }
             let mut base = resolve_import_set(items[1], env)?;
-            let mut renamed = HashMap::new();
+            let mut renamed_values = HashMap::new();
+            let mut renamed_syntax = HashMap::new();
             for item in &items[2..] {
                 let parts = item.collect_proper_list().ok_or_else(|| {
                     SchemeError::syntax("'rename' import spec must be proper", None)
@@ -2272,12 +2809,23 @@ fn resolve_import_set(datum: &Datum, env: EnvRef) -> Result<HashMap<String, Valu
                         None,
                     ));
                 };
-                let value = base.remove(from).ok_or_else(|| {
-                    SchemeError::name(format!("import set does not contain identifier: {from}"))
-                })?;
-                renamed.insert(to.clone(), value);
+                let mut found = false;
+                if let Some(value) = base.values.remove(from) {
+                    renamed_values.insert(to.clone(), value);
+                    found = true;
+                }
+                if let Some(transformer) = base.syntax.remove(from) {
+                    renamed_syntax.insert(to.clone(), transformer);
+                    found = true;
+                }
+                if !found {
+                    return Err(SchemeError::name(format!(
+                        "import set does not contain identifier: {from}"
+                    )));
+                }
             }
-            base.extend(renamed);
+            base.values.extend(renamed_values);
+            base.syntax.extend(renamed_syntax);
             Ok(base)
         }
         _ => {
@@ -2288,9 +2836,33 @@ fn resolve_import_set(datum: &Datum, env: EnvRef) -> Result<HashMap<String, Valu
                         "unknown library: {library_name}"
                     )))
                 },
-                |library| Ok(library.bindings().clone()),
+                |library| Ok(ImportSet {
+                    values: library.bindings().clone(),
+                    syntax: library.syntax_bindings().clone(),
+                }),
             )
         }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ImportSet {
+    values: HashMap<String, Value>,
+    syntax: HashMap<String, SyntaxRules>,
+}
+
+impl ImportSet {
+    fn extend(&mut self, other: ImportSet) {
+        self.values.extend(other.values);
+        self.syntax.extend(other.syntax);
+    }
+
+    fn bindings(&self) -> &HashMap<String, Value> {
+        &self.values
+    }
+
+    fn syntax_bindings(&self) -> &HashMap<String, SyntaxRules> {
+        &self.syntax
     }
 }
 

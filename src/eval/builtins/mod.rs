@@ -208,27 +208,6 @@ pub(super) fn optional_input_port(
     }
 }
 
-pub(super) fn compare_chain<F>(name: &str, args: &[Value], cmp: F) -> Result<bool, SchemeError>
-where
-    F: Fn(i64, i64) -> bool,
-{
-    if args.len() < 2 {
-        return Err(SchemeError::arity(format!(
-            "'{name}' expects at least 2 arguments"
-        )));
-    }
-
-    let mut previous = expect_number(name, &args[0])?;
-    for value in &args[1..] {
-        let current = expect_number(name, value)?;
-        if !cmp(previous, current) {
-            return Ok(false);
-        }
-        previous = current;
-    }
-    Ok(true)
-}
-
 pub(super) fn parse_range(
     name: &str,
     len: usize,
