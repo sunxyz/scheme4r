@@ -1,10 +1,9 @@
-pub mod parser;
-mod interpreter;
-mod env;
-mod types;
-mod procedure;
-mod utils;
-#[cfg(test)]
-mod tests;
+pub mod api;
+pub mod error;
+pub mod eval;
+pub mod reader;
+pub mod runtime;
 
-pub use interpreter::eval;
+pub use api::{eval, interpreter, BuiltinRegistry, Scheme};
+pub use error::{ErrorKind, SchemeError};
+pub use runtime::{BuiltinFn, EnvRef, Environment, NativeFn, SchemeString, Value};
