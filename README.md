@@ -4,6 +4,7 @@
 - Scheme for rust 
 - Impl R7RS
 - No keyword can be customized to overwrite
+- Proper tail-recursive evaluation for core tail positions
 
 ### Basic types
 - Numbers
@@ -21,6 +22,7 @@
 
 ### more feature
 - macro (deinfe-syntax syntax-rules)
+- Tail-safe control flow through `apply`, `call-with-values`, `eval`, `call/cc`, `dynamic-wind`, and `with-exception-handler`
 
 ### use
 - Support cmd and api , can embeddable

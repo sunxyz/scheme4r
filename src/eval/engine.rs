@@ -21,6 +21,58 @@ struct PortState {
     current_error: PortRef,
 }
 
+enum EvalStep {
+    Done(Value),
+    Eval(Datum, EnvRef),
+    Apply(Value, EnvRef, Vec<Value>),
+    CallWithCurrentContinuation(Value, EnvRef),
+    DynamicWind {
+        before: Value,
+        thunk: Value,
+        after: Value,
+        env: EnvRef,
+    },
+    WithExceptionHandler {
+        handler: Value,
+        thunk: Value,
+        env: EnvRef,
+    },
+}
+
+enum DriverAction {
+    Step(EvalStep),
+    Return(Value),
+    Raise(SchemeError),
+}
+
+enum ControlFrame {
+    CallWithCurrentContinuation {
+        token: usize,
+    },
+    DynamicWind {
+        after: Value,
+        env: EnvRef,
+        stage: DynamicWindStage,
+    },
+    WithExceptionHandler {
+        handler: Value,
+        env: EnvRef,
+        stage: ExceptionHandlerStage,
+    },
+}
+
+enum DynamicWindStage {
+    Before { thunk: Value },
+    Thunk,
+    AfterValue(Value),
+    AfterError(SchemeError),
+}
+
+enum ExceptionHandlerStage {
+    Thunk,
+    HandlerResult { continuable: bool },
+}
+
 pub struct Engine {
     root_env: EnvRef,
     port_state: Rc<RefCell<PortState>>,
@@ -102,20 +154,181 @@ impl Engine {
     }
 
     fn eval(&self, expr: &Datum, env: EnvRef) -> Result<Value, SchemeError> {
+        self.drive_step(EvalStep::Eval(expr.clone(), env))
+    }
+
+    fn drive_step(&self, initial_step: EvalStep) -> Result<Value, SchemeError> {
+        let mut action = DriverAction::Step(initial_step);
+        let mut frames = Vec::new();
+
+        loop {
+            action = match action {
+                DriverAction::Step(step) => match step {
+                    EvalStep::Done(value) => DriverAction::Return(value),
+                    EvalStep::Eval(expr, env) => match self.eval_step(&expr, env) {
+                        Ok(step) => DriverAction::Step(step),
+                        Err(err) => DriverAction::Raise(err),
+                    },
+                    EvalStep::Apply(proc, env, args) => match self.apply_step(proc, env, args) {
+                        Ok(step) => DriverAction::Step(step),
+                        Err(err) => DriverAction::Raise(err),
+                    },
+                    EvalStep::CallWithCurrentContinuation(receiver, env) => {
+                        let token = next_driver_continuation_token();
+                        frames.push(ControlFrame::CallWithCurrentContinuation { token });
+                        DriverAction::Step(EvalStep::Apply(
+                            receiver,
+                            env,
+                            vec![Value::Continuation(token)],
+                        ))
+                    }
+                    EvalStep::DynamicWind {
+                        before,
+                        thunk,
+                        after,
+                        env,
+                    } => {
+                        frames.push(ControlFrame::DynamicWind {
+                            after,
+                            env: env.clone(),
+                            stage: DynamicWindStage::Before { thunk },
+                        });
+                        DriverAction::Step(EvalStep::Apply(before, env, Vec::new()))
+                    }
+                    EvalStep::WithExceptionHandler { handler, thunk, env } => {
+                        frames.push(ControlFrame::WithExceptionHandler {
+                            handler,
+                            env: env.clone(),
+                            stage: ExceptionHandlerStage::Thunk,
+                        });
+                        DriverAction::Step(EvalStep::Apply(thunk, env, Vec::new()))
+                    }
+                },
+                DriverAction::Return(value) => match self.handle_driver_value(value, &mut frames) {
+                    DriverAction::Return(value) => return Ok(value),
+                    next => next,
+                },
+                DriverAction::Raise(err) => match self.handle_driver_error(err, &mut frames) {
+                    DriverAction::Raise(err) => return Err(err),
+                    next => next,
+                },
+            };
+        }
+    }
+
+    fn handle_driver_value(&self, mut value: Value, frames: &mut Vec<ControlFrame>) -> DriverAction {
+        loop {
+            let Some(frame) = frames.pop() else {
+                return DriverAction::Return(value);
+            };
+
+            match frame {
+                ControlFrame::CallWithCurrentContinuation { .. } => {}
+                ControlFrame::DynamicWind { after, env, stage } => match stage {
+                    DynamicWindStage::Before { thunk } => {
+                        frames.push(ControlFrame::DynamicWind {
+                            after,
+                            env: env.clone(),
+                            stage: DynamicWindStage::Thunk,
+                        });
+                        return DriverAction::Step(EvalStep::Apply(thunk, env, Vec::new()));
+                    }
+                    DynamicWindStage::Thunk => {
+                        frames.push(ControlFrame::DynamicWind {
+                            after: after.clone(),
+                            env: env.clone(),
+                            stage: DynamicWindStage::AfterValue(value),
+                        });
+                        return DriverAction::Step(EvalStep::Apply(after, env, Vec::new()));
+                    }
+                    DynamicWindStage::AfterValue(stored) => {
+                        value = stored;
+                    }
+                    DynamicWindStage::AfterError(err) => {
+                        return DriverAction::Raise(err);
+                    }
+                },
+                ControlFrame::WithExceptionHandler { stage, .. } => match stage {
+                    ExceptionHandlerStage::Thunk => {}
+                    ExceptionHandlerStage::HandlerResult { continuable } => {
+                        if continuable {
+                            return DriverAction::Return(value);
+                        }
+                        return DriverAction::Raise(SchemeError::raised(value, false));
+                    }
+                },
+            }
+        }
+    }
+
+    fn handle_driver_error(&self, err: SchemeError, frames: &mut Vec<ControlFrame>) -> DriverAction {
+        loop {
+            let Some(frame) = frames.pop() else {
+                return DriverAction::Raise(err);
+            };
+
+            match frame {
+                ControlFrame::CallWithCurrentContinuation { token } => {
+                    if let Some((jump_token, value)) = err.as_continuation_jump() {
+                        if jump_token == token {
+                            return self.handle_driver_value(value.clone(), frames);
+                        }
+                    }
+                }
+                ControlFrame::DynamicWind { after, env, stage } => match stage {
+                    DynamicWindStage::Before { .. } => {}
+                    DynamicWindStage::Thunk => {
+                        frames.push(ControlFrame::DynamicWind {
+                            after: after.clone(),
+                            env: env.clone(),
+                            stage: DynamicWindStage::AfterError(err),
+                        });
+                        return DriverAction::Step(EvalStep::Apply(after, env, Vec::new()));
+                    }
+                    DynamicWindStage::AfterValue(_) | DynamicWindStage::AfterError(_) => {}
+                },
+                ControlFrame::WithExceptionHandler {
+                    handler,
+                    env,
+                    stage,
+                } => match stage {
+                    ExceptionHandlerStage::Thunk => {
+                        if let Some((object, continuable)) = err.as_raised() {
+                            frames.push(ControlFrame::WithExceptionHandler {
+                                handler: handler.clone(),
+                                env: env.clone(),
+                                stage: ExceptionHandlerStage::HandlerResult { continuable },
+                            });
+                            return DriverAction::Step(EvalStep::Apply(
+                                handler,
+                                env,
+                                vec![object.clone()],
+                            ));
+                        }
+                    }
+                    ExceptionHandlerStage::HandlerResult { .. } => {}
+                },
+            }
+        }
+    }
+
+    fn eval_step(&self, expr: &Datum, env: EnvRef) -> Result<EvalStep, SchemeError> {
         match expr {
-            Datum::Boolean(value) => Ok(Value::Boolean(*value)),
-            Datum::Number(value) => Ok(Value::Number(*value)),
-            Datum::Character(value) => Ok(Value::Character(*value)),
-            Datum::String(value) => Ok(Value::string(value.clone())),
-            Datum::Vector(values) => Ok(Value::vector(values.iter().map(datum_to_value).collect())),
-            Datum::ByteVector(values) => Ok(Value::bytevector(values.clone())),
-            Datum::Symbol(name) => env.borrow().lookup(name),
-            Datum::EmptyList => Ok(Value::EmptyList),
+            Datum::Boolean(value) => Ok(EvalStep::Done(Value::Boolean(*value))),
+            Datum::Number(value) => Ok(EvalStep::Done(Value::Number(*value))),
+            Datum::Character(value) => Ok(EvalStep::Done(Value::Character(*value))),
+            Datum::String(value) => Ok(EvalStep::Done(Value::string(value.clone()))),
+            Datum::Vector(values) => Ok(EvalStep::Done(Value::vector(
+                values.iter().map(datum_to_value).collect(),
+            ))),
+            Datum::ByteVector(values) => Ok(EvalStep::Done(Value::bytevector(values.clone()))),
+            Datum::Symbol(name) => Ok(EvalStep::Done(env.borrow().lookup(name)?)),
+            Datum::EmptyList => Ok(EvalStep::Done(Value::EmptyList)),
             Datum::Pair(_, _) => self.eval_list_form(expr, env),
         }
     }
 
-    fn eval_list_form(&self, expr: &Datum, env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_list_form(&self, expr: &Datum, env: EnvRef) -> Result<EvalStep, SchemeError> {
         let items = expr.collect_proper_list().ok_or_else(|| {
             SchemeError::syntax("expected a proper list in application position", None)
         })?;
@@ -153,7 +366,7 @@ impl Engine {
             let transformer = { env.borrow().lookup_syntax(symbol) };
             if let Some(transformer) = transformer {
                 let expanded = transformer.expand(expr)?;
-                return self.eval(&expanded, env);
+                return Ok(EvalStep::Eval(expanded, env));
             }
         }
 
@@ -162,26 +375,26 @@ impl Engine {
         for expr in &items[1..] {
             args.push(self.eval_single(expr, env.clone(), "argument position")?);
         }
-        self.apply(operator, env, args)
+        Ok(EvalStep::Apply(operator, env, args))
     }
 
-    fn eval_quote(&self, items: &[&Datum]) -> Result<Value, SchemeError> {
+    fn eval_quote(&self, items: &[&Datum]) -> Result<EvalStep, SchemeError> {
         if items.len() != 2 {
             return Err(SchemeError::arity("'quote' expects exactly 1 argument"));
         }
-        Ok(datum_to_value(items[1]))
+        Ok(EvalStep::Done(datum_to_value(items[1])))
     }
 
-    fn eval_quasiquote(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_quasiquote(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         if items.len() != 2 {
             return Err(SchemeError::arity(
                 "'quasiquote' expects exactly 1 argument",
             ));
         }
-        self.quasiquote(items[1], env, 1)
+        Ok(EvalStep::Done(self.quasiquote(items[1], env, 1)?))
     }
 
-    fn eval_if(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_if(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         if items.len() < 3 || items.len() > 4 {
             return Err(SchemeError::arity(
                 "'if' expects 2 or 3 arguments after the keyword",
@@ -190,15 +403,15 @@ impl Engine {
 
         let predicate = self.eval_single(items[1], env.clone(), "'if' predicate")?;
         if predicate.is_truthy() {
-            self.eval(items[2], env)
+            Ok(EvalStep::Eval(items[2].clone(), env))
         } else if items.len() == 4 {
-            self.eval(items[3], env)
+            Ok(EvalStep::Eval(items[3].clone(), env))
         } else {
-            Ok(Value::Unspecified)
+            Ok(EvalStep::Done(Value::Unspecified))
         }
     }
 
-    fn eval_define(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_define(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         if items.len() < 3 {
             return Err(SchemeError::arity(
                 "'define' expects a name and at least one body expression",
@@ -215,7 +428,7 @@ impl Engine {
                 }
                 let value = self.eval_single(items[2], env.clone(), "'define' value")?;
                 env.borrow_mut().define(name.clone(), value);
-                Ok(Value::Unspecified)
+                Ok(EvalStep::Done(Value::Unspecified))
             }
             Datum::Pair(_, _) => {
                 let signature = items[1].collect_proper_list().ok_or_else(|| {
@@ -233,7 +446,7 @@ impl Engine {
                     .collect::<Vec<_>>();
                 let proc = Value::lambda(Some(name.clone()), params, None, body, env.clone());
                 env.borrow_mut().define(name.clone(), proc);
-                Ok(Value::Unspecified)
+                Ok(EvalStep::Done(Value::Unspecified))
             }
             _ => Err(SchemeError::syntax(
                 "define expects a symbol or function signature",
@@ -242,7 +455,11 @@ impl Engine {
         }
     }
 
-    fn eval_define_record_type(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_define_record_type(
+        &self,
+        items: &[&Datum],
+        env: EnvRef,
+    ) -> Result<EvalStep, SchemeError> {
         if items.len() < 4 {
             return Err(SchemeError::arity(
                 "'define-record-type' expects a type name, constructor, predicate, and field specs",
@@ -330,7 +547,7 @@ impl Engine {
             }
         }
 
-        Ok(Value::Unspecified)
+        Ok(EvalStep::Done(Value::Unspecified))
     }
 
     fn eval_internal_define(&self, datum: &Datum, env: EnvRef) -> Result<(), SchemeError> {
@@ -380,7 +597,7 @@ impl Engine {
         items: &[&Datum],
         env: EnvRef,
         name: Option<String>,
-    ) -> Result<Value, SchemeError> {
+    ) -> Result<EvalStep, SchemeError> {
         if items.len() < 3 {
             return Err(SchemeError::arity(
                 "'lambda' expects a parameter list and at least one body expression",
@@ -391,10 +608,10 @@ impl Engine {
             .iter()
             .map(|datum| (*datum).clone())
             .collect::<Vec<_>>();
-        Ok(Value::lambda(name, params, rest, body, env))
+        Ok(EvalStep::Done(Value::lambda(name, params, rest, body, env)))
     }
 
-    fn eval_define_syntax(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_define_syntax(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         if items.len() != 3 {
             return Err(SchemeError::arity(
                 "'define-syntax' expects a name and a transformer specification",
@@ -410,10 +627,10 @@ impl Engine {
 
         let transformer = SyntaxRules::compile(items[2])?;
         env.borrow_mut().define_syntax(name.clone(), transformer);
-        Ok(Value::Unspecified)
+        Ok(EvalStep::Done(Value::Unspecified))
     }
 
-    fn eval_import(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_import(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         if items.is_empty() {
             return Err(SchemeError::arity(
                 "'import' expects at least one import set",
@@ -425,10 +642,10 @@ impl Engine {
             imported.extend(resolve_import_set(item, env.clone())?);
         }
         env.borrow_mut().import_bindings(&imported);
-        Ok(Value::Unspecified)
+        Ok(EvalStep::Done(Value::Unspecified))
     }
 
-    fn eval_define_library(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_define_library(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         if items.len() < 3 {
             return Err(SchemeError::arity(
                 "'define-library' expects a name and declarations",
@@ -471,20 +688,21 @@ impl Engine {
         }
 
         if !begin_forms.is_empty() {
-            self.eval_begin(&begin_forms, library_env.clone())?;
+            let step = self.eval_begin(&begin_forms, library_env.clone())?;
+            self.drive_step(step)?;
         }
 
         let exported_bindings = collect_library_exports(&library_env, &exports)?;
         env.borrow_mut()
             .define_library(library_name, Library::new(exported_bindings));
-        Ok(Value::Unspecified)
+        Ok(EvalStep::Done(Value::Unspecified))
     }
 
-    fn eval_let_syntax(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_let_syntax(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         self.eval_local_syntax(items, env, false)
     }
 
-    fn eval_letrec_syntax(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_letrec_syntax(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         self.eval_local_syntax(items, env, true)
     }
 
@@ -493,7 +711,7 @@ impl Engine {
         items: &[&Datum],
         env: EnvRef,
         _recursive: bool,
-    ) -> Result<Value, SchemeError> {
+    ) -> Result<EvalStep, SchemeError> {
         if items.len() < 3 {
             return Err(SchemeError::arity(
                 "local syntax forms expect bindings and at least one body expression",
@@ -511,15 +729,18 @@ impl Engine {
         self.eval_body(&items[2..], syntax_env)
     }
 
-    fn eval_begin(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
-        let mut result = Value::Unspecified;
-        for expr in items {
-            result = self.eval(expr, env.clone())?;
+    fn eval_begin(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
+        let Some((last, rest)) = items.split_last() else {
+            return Ok(EvalStep::Done(Value::Unspecified));
+        };
+
+        for expr in rest {
+            self.eval(expr, env.clone())?;
         }
-        Ok(result)
+        Ok(EvalStep::Eval((*last).clone(), env))
     }
 
-    fn eval_body(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_body(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         let define_count = items
             .iter()
             .take_while(|item| is_definition_form(item))
@@ -544,28 +765,28 @@ impl Engine {
         self.eval_begin(&items[define_count..], body_env)
     }
 
-    fn eval_and(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_and(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         let mut result = Value::Boolean(true);
         for expr in items {
             result = self.eval_single(expr, env.clone(), "'and' expression")?;
             if !result.is_truthy() {
-                return Ok(result);
+                return Ok(EvalStep::Done(result));
             }
         }
-        Ok(result)
+        Ok(EvalStep::Done(result))
     }
 
-    fn eval_or(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_or(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         for expr in items {
             let value = self.eval_single(expr, env.clone(), "'or' expression")?;
             if value.is_truthy() {
-                return Ok(value);
+                return Ok(EvalStep::Done(value));
             }
         }
-        Ok(Value::Boolean(false))
+        Ok(EvalStep::Done(Value::Boolean(false)))
     }
 
-    fn eval_let(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_let(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         if items.len() < 3 {
             return Err(SchemeError::arity(
                 "'let' expects bindings and at least one body expression",
@@ -594,7 +815,7 @@ impl Engine {
                     .collect::<Vec<_>>();
                 let proc = Value::lambda(Some(name.clone()), params, None, body, let_env.clone());
                 let_env.borrow_mut().define(name.clone(), proc.clone());
-                self.apply(proc, let_env, args)
+                Ok(EvalStep::Apply(proc, let_env, args))
             }
             _ => {
                 let bindings = parse_bindings(items[1])?;
@@ -611,7 +832,7 @@ impl Engine {
         }
     }
 
-    fn eval_let_star(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_let_star(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         if items.len() < 3 {
             return Err(SchemeError::arity(
                 "'let*' expects bindings and at least one body expression",
@@ -627,7 +848,7 @@ impl Engine {
         self.eval_body(&items[2..], let_env)
     }
 
-    fn eval_letrec(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_letrec(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         if items.len() < 3 {
             return Err(SchemeError::arity(
                 "'letrec' expects bindings and at least one body expression",
@@ -649,7 +870,7 @@ impl Engine {
         self.eval_body(&items[2..], let_env)
     }
 
-    fn eval_cond(&self, clauses: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_cond(&self, clauses: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         for (index, clause) in clauses.iter().enumerate() {
             let entries = clause
                 .collect_proper_list()
@@ -678,7 +899,7 @@ impl Engine {
             }
 
             if entries.len() == 1 {
-                return Ok(test_value);
+                return Ok(EvalStep::Done(test_value));
             }
 
             if entries.get(1).and_then(|datum| datum.as_symbol()) == Some("=>") {
@@ -689,16 +910,16 @@ impl Engine {
                     ));
                 }
                 let recipient = self.eval_single(entries[2], env.clone(), "'cond' recipient")?;
-                return self.apply(recipient, env.clone(), vec![test_value]);
+                return Ok(EvalStep::Apply(recipient, env.clone(), vec![test_value]));
             }
 
             return self.eval_begin(&entries[1..], env.clone());
         }
 
-        Ok(Value::Unspecified)
+        Ok(EvalStep::Done(Value::Unspecified))
     }
 
-    fn eval_case(&self, clauses: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_case(&self, clauses: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         let (key_expr, clause_exprs) = clauses
             .split_first()
             .ok_or_else(|| SchemeError::arity("'case' expects a key and at least one clause"))?;
@@ -738,7 +959,7 @@ impl Engine {
             }
 
             if entries.len() == 1 {
-                return Ok(Value::Unspecified);
+                return Ok(EvalStep::Done(Value::Unspecified));
             }
 
             if entries.get(1).and_then(|datum| datum.as_symbol()) == Some("=>") {
@@ -749,16 +970,16 @@ impl Engine {
                     ));
                 }
                 let recipient = self.eval_single(entries[2], env.clone(), "'case' recipient")?;
-                return self.apply(recipient, env.clone(), vec![key.clone()]);
+                return Ok(EvalStep::Apply(recipient, env.clone(), vec![key.clone()]));
             }
 
             return self.eval_begin(&entries[1..], env.clone());
         }
 
-        Ok(Value::Unspecified)
+        Ok(EvalStep::Done(Value::Unspecified))
     }
 
-    fn eval_do(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_do(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         if items.len() < 3 {
             return Err(SchemeError::arity(
                 "'do' expects bindings, a termination clause, and an optional body",
@@ -793,13 +1014,14 @@ impl Engine {
                 .is_truthy()
             {
                 if result_exprs.is_empty() {
-                    return Ok(Value::Unspecified);
+                    return Ok(EvalStep::Done(Value::Unspecified));
                 }
                 return self.eval_begin(result_exprs, loop_env.clone());
             }
 
             if !commands.is_empty() {
-                self.eval_begin(commands, loop_env.clone())?;
+                let step = self.eval_begin(commands, loop_env.clone())?;
+                self.drive_step(step)?;
             }
 
             let mut updates = Vec::with_capacity(bindings.len());
@@ -819,7 +1041,7 @@ impl Engine {
         }
     }
 
-    fn eval_set(&self, items: &[&Datum], env: EnvRef) -> Result<Value, SchemeError> {
+    fn eval_set(&self, items: &[&Datum], env: EnvRef) -> Result<EvalStep, SchemeError> {
         if items.len() != 3 {
             return Err(SchemeError::arity("'set!' expects exactly 2 arguments"));
         }
@@ -828,7 +1050,7 @@ impl Engine {
         };
         let value = self.eval_single(items[2], env.clone(), "'set!' value")?;
         env.borrow_mut().set(name, value)?;
-        Ok(Value::Unspecified)
+        Ok(EvalStep::Done(Value::Unspecified))
     }
 
     pub(crate) fn apply(
@@ -837,15 +1059,36 @@ impl Engine {
         env: EnvRef,
         args: Vec<Value>,
     ) -> Result<Value, SchemeError> {
+        self.drive_step(EvalStep::Apply(proc, env, args))
+    }
+
+    fn apply_step(
+        &self,
+        proc: Value,
+        env: EnvRef,
+        args: Vec<Value>,
+    ) -> Result<EvalStep, SchemeError> {
         match proc {
             Value::Procedure(proc_ref) => match proc_ref.as_ref() {
-                Procedure::Builtin { func, .. } => {
-                    self.env_stack.borrow_mut().push(env);
-                    let result = func(self, &args);
-                    self.env_stack.borrow_mut().pop();
-                    result
-                }
-                Procedure::Native { func, .. } => func(self, env, &args),
+                Procedure::Builtin { name, func } => match name.as_str() {
+                    "apply" => self.apply_apply_builtin(env, args),
+                    "call-with-values" => self.apply_call_with_values_builtin(env, args),
+                    "call-with-current-continuation" | "call/cc" => {
+                        self.apply_call_with_current_continuation_builtin(env, args)
+                    }
+                    "dynamic-wind" => self.apply_dynamic_wind_builtin(env, args),
+                    "with-exception-handler" => {
+                        self.apply_with_exception_handler_builtin(env, args)
+                    }
+                    "eval" => self.apply_eval_builtin(env, args),
+                    _ => {
+                        self.env_stack.borrow_mut().push(env);
+                        let result = func(self, &args);
+                        self.env_stack.borrow_mut().pop();
+                        Ok(EvalStep::Done(result?))
+                    }
+                },
+                Procedure::Native { func, .. } => Ok(EvalStep::Done(func(self, env, &args)?)),
                 Procedure::Lambda {
                     params,
                     rest,
@@ -886,10 +1129,10 @@ impl Engine {
                             args.len()
                         )));
                     }
-                    Ok(Value::record(RecordInstance::new(
+                    Ok(EvalStep::Done(Value::record(RecordInstance::new(
                         record_type.clone(),
                         args,
-                    )))
+                    ))))
                 }
                 Procedure::RecordPredicate { record_type, .. } => {
                     if args.len() != 1 {
@@ -904,7 +1147,7 @@ impl Engine {
                         }
                         _ => false,
                     };
-                    Ok(Value::Boolean(is_match))
+                    Ok(EvalStep::Done(Value::Boolean(is_match)))
                 }
                 Procedure::RecordAccessor {
                     record_type,
@@ -930,10 +1173,12 @@ impl Engine {
                         ));
                     }
 
-                    instance
+                    Ok(EvalStep::Done(
+                        instance
                         .field(*field_index)
                         .cloned()
-                        .ok_or_else(|| SchemeError::runtime("record accessor index out of range"))
+                        .ok_or_else(|| SchemeError::runtime("record accessor index out of range"))?,
+                    ))
                 }
                 Procedure::RecordMutator {
                     record_type,
@@ -966,18 +1211,18 @@ impl Engine {
                     if !instance.set_field(*field_index, args[1].clone()) {
                         return Err(SchemeError::runtime("record mutator index out of range"));
                     }
-                    Ok(Value::Unspecified)
+                    Ok(EvalStep::Done(Value::Unspecified))
                 }
             },
             Value::Parameter(parameter) => match args.as_slice() {
-                [] => Ok(parameter.cell().borrow().clone()),
+                [] => Ok(EvalStep::Done(parameter.cell().borrow().clone())),
                 [value] => {
                     let mut new_value = value.clone();
                     if let Some(converter) = parameter.converter() {
                         new_value = self.apply(converter, self.current_env(), vec![new_value])?;
                     }
                     *parameter.cell().borrow_mut() = new_value;
-                    Ok(Value::Unspecified)
+                    Ok(EvalStep::Done(Value::Unspecified))
                 }
                 _ => Err(SchemeError::arity(
                     "parameter procedures expect 0 or 1 arguments",
@@ -993,6 +1238,133 @@ impl Engine {
                 "attempted to call a non-procedure: {other}"
             ))),
         }
+    }
+
+    fn apply_apply_builtin(&self, env: EnvRef, args: Vec<Value>) -> Result<EvalStep, SchemeError> {
+        if args.len() < 2 {
+            return Err(SchemeError::arity(
+                "'apply' expects a procedure, optional arguments, and a final list",
+            ));
+        }
+
+        let procedure = args[0].clone();
+        let (last, leading) = args[1..].split_last().ok_or_else(|| {
+            SchemeError::arity("'apply' expects a procedure and a final argument list")
+        })?;
+
+        let mut applied_args = leading.to_vec();
+        applied_args.extend(last.to_proper_list_vec().ok_or_else(|| {
+            SchemeError::type_error(format!("'apply' expected a proper list, got {last}"))
+        })?);
+        Ok(EvalStep::Apply(procedure, env, applied_args))
+    }
+
+    fn apply_call_with_values_builtin(
+        &self,
+        env: EnvRef,
+        args: Vec<Value>,
+    ) -> Result<EvalStep, SchemeError> {
+        if args.len() != 2 {
+            return Err(SchemeError::arity(format!(
+                "'call-with-values' expects {} arguments, got {}",
+                2,
+                args.len()
+            )));
+        }
+
+        let producer = args[0].clone();
+        let consumer = args[1].clone();
+        let produced = self.apply(producer, env.clone(), Vec::new())?;
+        let consumer_args = match produced {
+            Value::Multiple(values) => values,
+            value => vec![value],
+        };
+        Ok(EvalStep::Apply(consumer, env, consumer_args))
+    }
+
+    fn apply_call_with_current_continuation_builtin(
+        &self,
+        env: EnvRef,
+        args: Vec<Value>,
+    ) -> Result<EvalStep, SchemeError> {
+        if args.len() != 1 {
+            return Err(SchemeError::arity(format!(
+                "'call-with-current-continuation' expects {} arguments, got {}",
+                1,
+                args.len()
+            )));
+        }
+
+        Ok(EvalStep::CallWithCurrentContinuation(args[0].clone(), env))
+    }
+
+    fn apply_dynamic_wind_builtin(
+        &self,
+        env: EnvRef,
+        args: Vec<Value>,
+    ) -> Result<EvalStep, SchemeError> {
+        if args.len() != 3 {
+            return Err(SchemeError::arity(format!(
+                "'dynamic-wind' expects {} arguments, got {}",
+                3,
+                args.len()
+            )));
+        }
+
+        Ok(EvalStep::DynamicWind {
+            before: args[0].clone(),
+            thunk: args[1].clone(),
+            after: args[2].clone(),
+            env,
+        })
+    }
+
+    fn apply_with_exception_handler_builtin(
+        &self,
+        env: EnvRef,
+        args: Vec<Value>,
+    ) -> Result<EvalStep, SchemeError> {
+        if args.len() != 2 {
+            return Err(SchemeError::arity(format!(
+                "'with-exception-handler' expects {} arguments, got {}",
+                2,
+                args.len()
+            )));
+        }
+
+        Ok(EvalStep::WithExceptionHandler {
+            handler: args[0].clone(),
+            thunk: args[1].clone(),
+            env,
+        })
+    }
+
+    fn apply_eval_builtin(&self, env: EnvRef, args: Vec<Value>) -> Result<EvalStep, SchemeError> {
+        if args.len() != 1 {
+            return Err(SchemeError::arity(format!(
+                "'eval' expects {} arguments, got {}",
+                1,
+                args.len()
+            )));
+        }
+
+        match &args[0] {
+            Value::String(source) => {
+                self.eval_forms_as_step(Reader::new(&source.to_plain_string()).read_all()?, env)
+            }
+            value => Ok(EvalStep::Eval(value.to_datum()?, env)),
+        }
+    }
+
+    fn eval_forms_as_step(&self, forms: Vec<Datum>, env: EnvRef) -> Result<EvalStep, SchemeError> {
+        let Some((last, rest)) = forms.split_last() else {
+            return Ok(EvalStep::Done(Value::Unspecified));
+        };
+
+        for form in rest {
+            self.eval(form, env.clone())?;
+        }
+        Ok(EvalStep::Eval(last.clone(), env))
     }
 
     fn quasiquote(&self, datum: &Datum, env: EnvRef, depth: usize) -> Result<Value, SchemeError> {
@@ -1103,7 +1475,7 @@ impl Engine {
         body: &[Datum],
         env: EnvRef,
         args: Vec<Value>,
-    ) -> Result<Value, SchemeError> {
+    ) -> Result<EvalStep, SchemeError> {
         if rest.is_none() && params.len() != args.len() {
             return Err(SchemeError::arity(format!(
                 "lambda expected {} arguments, got {}",
@@ -1682,4 +2054,121 @@ fn parse_syntax_bindings(datum: &Datum) -> Result<Vec<(String, SyntaxRules)>, Sc
     }
 
     Ok(bindings)
+}
+
+fn next_driver_continuation_token() -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT_TOKEN: AtomicUsize = AtomicUsize::new(1);
+    NEXT_TOKEN.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn current_x(engine: &Engine, args: &[Value]) -> Result<Value, SchemeError> {
+        if !args.is_empty() {
+            return Err(SchemeError::arity("'current-x' expects exactly 0 arguments"));
+        }
+        engine.current_env().borrow().lookup("x")
+    }
+
+    #[test]
+    fn apply_builtin_preserves_current_env_for_nested_builtin_calls() {
+        let env = Environment::standard();
+        env.borrow_mut()
+            .define("current-x", Value::builtin("current-x", current_x));
+        let engine = Engine::new(env);
+
+        let value = engine.run("(let ((x 42)) (apply current-x '()))").unwrap();
+        assert!(matches!(value, Value::Number(42)));
+    }
+
+    #[test]
+    fn call_with_values_builtin_preserves_current_env_for_consumer_calls() {
+        let env = Environment::standard();
+        env.borrow_mut()
+            .define("current-x", Value::builtin("current-x", current_x));
+        let engine = Engine::new(env);
+
+        let value = engine
+            .run(
+                "\
+                (let ((x 42))
+                  (call-with-values
+                    (lambda () (values))
+                    (lambda () (current-x))))
+                ",
+            )
+            .unwrap();
+        assert!(matches!(value, Value::Number(42)));
+    }
+
+    #[test]
+    fn eval_builtin_preserves_current_env_for_nested_builtin_calls() {
+        let env = Environment::standard();
+        env.borrow_mut()
+            .define("current-x", Value::builtin("current-x", current_x));
+        let engine = Engine::new(env);
+
+        let value = engine.run("(let ((x 42)) (eval '(current-x)))").unwrap();
+        assert!(matches!(value, Value::Number(42)));
+    }
+
+    #[test]
+    fn call_cc_builtin_preserves_current_env_for_receiver_calls() {
+        let env = Environment::standard();
+        env.borrow_mut()
+            .define("current-x", Value::builtin("current-x", current_x));
+        let engine = Engine::new(env);
+
+        let value = engine
+            .run("(let ((x 42)) (call/cc (lambda (k) (current-x))))")
+            .unwrap();
+        assert!(matches!(value, Value::Number(42)));
+    }
+
+    #[test]
+    fn dynamic_wind_builtin_preserves_current_env_for_thunk_calls() {
+        let env = Environment::standard();
+        env.borrow_mut()
+            .define("current-x", Value::builtin("current-x", current_x));
+        let engine = Engine::new(env);
+
+        let value = engine
+            .run(
+                "\
+                (let ((x 42))
+                  (dynamic-wind
+                    (lambda () 'before)
+                    (lambda () (current-x))
+                    (lambda () 'after)))
+                ",
+            )
+            .unwrap();
+        assert!(matches!(value, Value::Number(42)));
+    }
+
+    #[test]
+    fn with_exception_handler_builtin_preserves_current_env_for_handler_calls() {
+        let env = Environment::standard();
+        env.borrow_mut()
+            .define("current-x", Value::builtin("current-x", current_x));
+        let engine = Engine::new(env);
+
+        let value = engine
+            .run(
+                "\
+                (let ((x 42))
+                  (with-exception-handler
+                    (lambda (obj) (current-x))
+                    (lambda () (raise 'boom))))
+                ",
+            )
+            .unwrap_err();
+
+        let (object, continuable) = value.as_raised().unwrap();
+        assert!(!continuable);
+        assert!(matches!(object, Value::Number(42)));
+    }
 }
